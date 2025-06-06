@@ -390,180 +390,98 @@ def _(forecast_df, go, historical_data, scenario):
 
 
 @app.cell
-def _(forecast_df, go, historical_data, mo, r_squared):
-    # This is the NEW cell for creating KPI cards and the Chart.
-    # We combine them here because they share a lot of the same data.
+def __(historical_data, forecast_df, go, mo, np):
+    # --- Create KPI Statistics Cards ---
+    
+    # Placeholder for R-squared if not calculated elsewhere
+    r_squared = 0.85 
 
-    # --- 1. Create KPI Statistics Cards ---
-
-    # Calculate Trend
     last_historical = historical_data['cpr'].iloc[-1]
     first_forecast = forecast_df['cpr_forecast'].iloc[0]
-    trend_direction = "Falling" if first_forecast < last_historical else "Rising"
-    trend_icon = "↘️" if trend_direction == "Falling" else "↗️"
+    trend_direction = "Falling ↘️" if first_forecast < last_historical else "Rising ↗️"
 
-    # Create individual stat cards
-    kpi_next_cpr = mo.stat(
-        label="Next Month CPR",
-        value=f"{first_forecast:.2%}",
-        caption=f"vs. {last_historical:.2%} historical"
-    )
-
-    kpi_confidence = mo.stat(
-        label="95% Confidence",
-        value=f"±{ (forecast_df['upper_bound'].iloc[0] - first_forecast):.2% }",
-        caption="based on historical volatility"
-    )
-
-    kpi_r_squared = mo.stat(
-        label="Model R²",
-        value=f"{r_squared:.3f}",
-        caption="on backtest (placeholder)"
-    )
-
-    kpi_trend = mo.stat(
-        label="Trend",
-        value=f"{trend_direction} {trend_icon}",
-        caption="vs. last historical month"
-    )
-
-    # Arrange stats in a row
     kpi_cards = mo.hstack([
-        kpi_next_cpr, kpi_confidence, kpi_r_squared, kpi_trend
-    ], justify='space-around', gap=2)
+        mo.stat(label="Next Month CPR", value=f"{first_forecast:.2%}"),
+        mo.stat(label="95% Confidence", value=f"±{(forecast_df['upper_bound'].iloc[0] - first_forecast):.2%}"),
+        mo.stat(label="Model R² (demo)", value=f"{r_squared:.3f}"),
+        mo.stat(label="Trend", value=trend_direction)
+    ], justify='space-around')
 
-
-    # --- 2. Create Upgraded Interactive Chart ---
-
-    colors = {
-        'historical': '#3b82f6',  # A nice blue
-        'forecast': '#16a34a',    # A distinct green
-        'confidence_fill': 'rgba(22, 163, 74, 0.1)' # Light green fill
-    }
-
+    # --- Create Upgraded Interactive Chart ---
+    colors = {'historical': '#3b82f6', 'forecast': '#16a34a', 'confidence_fill': 'rgba(22, 163, 74, 0.1)'}
     fig = go.Figure()
 
-    # Confidence interval - MUST be added first for correct layering
     fig.add_trace(go.Scatter(
         x=forecast_df['Date'].tolist() + forecast_df['Date'].tolist()[::-1],
-        y=forecast_df['upper_bound'].tolist() + forecast_df['lower_bound'].tolist()[::-1],
-        fill='toself',
-        fillcolor=colors['confidence_fill'],
-        line=dict(color='rgba(255,255,255,0)'),
-        name='95% Confidence Interval',
-        hoverinfo='skip'
+        y=(forecast_df['upper_bound']*100).tolist() + (forecast_df['lower_bound']*100).tolist()[::-1],
+        fill='toself', fillcolor=colors['confidence_fill'],
+        line={'color': 'rgba(255,255,255,0)'}, name='95% Confidence Interval', hoverinfo='skip'
     ))
-
-    # Historical data - solid line
     fig.add_trace(go.Scatter(
         x=historical_data['Date'], y=historical_data['cpr'] * 100,
         mode='lines+markers', name='Historical CPR',
-        line=dict(color=colors['historical'], width=2.5),
-        marker=dict(size=4),
+        line={'color': colors['historical'], 'width': 2.5}, marker={'size': 4},
         hovertemplate='Date: %{x|%Y-%m}<br>CPR: %{y:.2f}%<extra></extra>'
     ))
-
-    # Forecast - dashed line with different color
     fig.add_trace(go.Scatter(
         x=forecast_df['Date'], y=forecast_df['cpr_forecast'] * 100,
         mode='lines+markers', name='Forecast',
-        line=dict(color=colors['forecast'], width=2.5, dash='dash'),
-        marker=dict(size=6, symbol='diamond'),
+        line={'color': colors['forecast'], 'width': 2.5, 'dash': 'dash'},
+        marker={'size': 6, 'symbol': 'diamond'},
         hovertemplate='Date: %{x|%Y-%m}<br>Forecast: %{y:.2f}%<extra></extra>'
     ))
 
-    # Update layout to professional standard
     fig.update_layout(
-        title={
-            'text': 'CPR Time Series Forecast', 'font': {'size': 20},
-            'x': 0.5, 'xanchor': 'center'
-        },
-        xaxis_title='Date',
-        yaxis_title='CPR (%)',
-        yaxis_tickformat='.0f', # Show as '20' instead of '20%'
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        hovermode='x unified',
-        height=450,
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-        ),
-        margin=dict(l=50, r=20, t=60, b=50),
-        # Use a clean template
-        template='plotly_white'
+        title={'text': 'CPR Time Series Forecast', 'x': 0.5},
+        yaxis_title='CPR (%)', yaxis_tickformat='.0f',
+        template='plotly_white', height=450, hovermode='x unified',
+        legend={'orientation': "h", 'yanchor': "bottom", 'y': 1.02, 'xanchor': "right", 'x': 1}
     )
-
-    return (fig,)
-
+    
+    return colors, fig, kpi_cards, r_squared
 
 @app.cell
-def _(forecast_df, historical_data, mo, pd):
-    # Combine historical and forecast data for table view
+def __(historical_data, forecast_df, mo, pd):
     # Prepare historical data
-    hist_display = historical_data[['Date', 'cpr', 'weighted_avg_rate', 'loan_count', 'total_upb']].copy()
+    hist_display = historical_data[['Date', 'cpr']].copy()
     hist_display['Type'] = 'Historical'
     hist_display.rename(columns={'cpr': 'CPR'}, inplace=True)
-
+    
     # Prepare forecast data
     forecast_display = forecast_df[['Date', 'cpr_forecast', 'lower_bound', 'upper_bound']].copy()
     forecast_display['Type'] = 'Forecast'
     forecast_display.rename(columns={'cpr_forecast': 'CPR'}, inplace=True)
-    forecast_display['weighted_avg_rate'] = None
-    forecast_display['loan_count'] = None
-    forecast_display['total_upb'] = None
-
-    # Combine and format
-    combined_data = pd.concat([
-        hist_display.tail(12),  # Last 12 months of historical
-        forecast_display.head(12)  # First 12 months of forecast
-    ])
-
-    # Format the data for display
-    combined_data['CPR'] = combined_data['CPR'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "")
-    combined_data['Date'] = combined_data['Date'].dt.strftime('%Y-%m')
-    combined_data['total_upb'] = combined_data['total_upb'].apply(
-        lambda x: f"${x/1e9:.1f}B" if pd.notna(x) else ""
+    
+    # Combine
+    combined_data = pd.concat([hist_display.tail(12), forecast_display.head(12)])
+    
+    # Format for display (simplified for clarity)
+    combined_data['CPR'] = combined_data['CPR'].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+    combined_data['Confidence Interval'] = combined_data.apply(
+        lambda row: f"[{row['lower_bound']:.1%} - {row['upper_bound']:.1%}]" if pd.notna(row.get('lower_bound')) else "", axis=1
     )
-    combined_data['loan_count'] = combined_data['loan_count'].apply(
-        lambda x: f"{x:,.0f}" if pd.notna(x) else ""
-    )
-    combined_data['weighted_avg_rate'] = combined_data['weighted_avg_rate'].apply(
-        lambda x: f"{x:.2f}%" if pd.notna(x) else ""
-    )
-
-    # Create bounds display for forecast rows
-    for idx, row in combined_data.iterrows():
-        if row['Type'] == 'Forecast' and pd.notna(row.get('lower_bound')):
-            combined_data.loc[idx, 'Confidence Interval'] = f"[{row['lower_bound']:.1%}, {row['upper_bound']:.1%}]"
-        else:
-            combined_data.loc[idx, 'Confidence Interval'] = ""
-
-    # Select columns for display
-    display_columns = ['Date', 'Type', 'CPR', 'Confidence Interval', 'weighted_avg_rate', 'loan_count', 'total_upb']
-    table_data = combined_data[display_columns]
-
-    data_table = mo.ui.table(
-        table_data,
-        page_size=15,
-        selection=None
-    )
-
-    return (data_table,)
-
+    
+    table_data = combined_data[['Date', 'Type', 'CPR', 'Confidence Interval']]
+    data_table = mo.ui.table(table_data, page_size=24, selection=None)
+    
+    return data_table
 
 @app.cell
-def _(data_table, fig, mo, stats):
-    # Create the final app layout
+def __(controls_layout, data_table, fig, kpi_cards, mo):
+    
     app_view = mo.vstack([
-        stats,
-        mo.tabs({
+        controls_layout,
+        mo.vspace(1),
+        kpi_cards,
+        mo.ui.tabs({
             "📈 Interactive Chart": fig,
             "📊 Data Table": data_table
         })
-    ])
-
+    ], align='center')
+    
+    # This line displays the final assembled app
     app_view
-    return
+    return app_view
 
 
 if __name__ == "__main__":
