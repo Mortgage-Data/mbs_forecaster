@@ -1,6 +1,37 @@
-# mbs_forecaster
+# mbs_forecaster - MBS CPR Time Series Forecasting Tool
+This tool provides interactive forecasts for MBS prepayment rates.
 
-# Github
+## Setup
+
+1.  **Clone the Repository:**
+    ```bash
+    git clone [https://github.com/Mortgage-Data/mbs_forecaster.git](https://github.com/Mortgage-Data/mbs_forecaster.git)
+    cd mbs_forecaster
+    ```
+
+2.  **Create Environment & Install Dependencies:**
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt 
+    ``` 
+    *(Note: It's good practice to create a `requirements.txt` file with `pip freeze > requirements.txt`)*
+
+3.  **Data Requirement:**
+    This project requires the `mbs.db` DuckDB database file. Please place this file in a location of your choice.
+
+4.  **Run the Application:**
+    You must tell the application where to find the database by setting the `MBS_DB_PATH` environment variable.
+
+    ```bash
+    # Example for Linux/macOS
+    MBS_DB_PATH='~/data/mbs.db' marimo edit forecaster.py
+
+    # If the file is in the current directory, you can run:
+    MBS_DB_PATH='mbs.db' marimo edit forecaster.py
+    ```
+
+# venv and github
 <!-- Create the repo: -->
 gh repo create Mortgage-Data/mbs_forecaster --public --add-readme --gitignore Python
 
