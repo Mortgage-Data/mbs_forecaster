@@ -9,20 +9,17 @@ app = mo.App()
 
 @app.cell
 def __creator__():
-    # This special cell runs first to import libraries and create objects
-    # that many other cells will need.
     import duckdb
     import plotly.express as px
     import os
-    # We also pass 'mo' itself so other cells can use it
     import marimo as mo
+    # Return all modules needed by other cells
     return duckdb, mo, os, px
 
 @app.cell
 def __(mo):
     # This cell just creates the title. It depends on 'mo'.
-    mo.md("# MBS CPR Time Series Forecasting Tool")
-    return
+    return mo.md("# MBS CPR Time Series Forecasting Tool")
 
 @app.cell
 def __(duckdb, mo, os):
@@ -30,9 +27,10 @@ def __(duckdb, mo, os):
     db_path = os.path.expanduser(
         os.getenv('MBS_DB_PATH', '~/data/mbs.db')
     )
-    mo.md(f"**Database:** `{db_path}`")
+    # Display the path for debugging
+    db_path_display = mo.md(f"**Database:** `{db_path}`")
     con = duckdb.connect(db_path, read_only=True)
-    return con, db_path
+    return con, db_path_display
 
 @app.cell
 def __(mo):
@@ -42,12 +40,11 @@ def __(mo):
         value="Normal",
         label="Select Economic Scenario:"
     )
-    return scenario,
+    return scenario
 
 @app.cell
-def __(con, scenario):
-    # This cell defines our query function. It depends on the DB connection
-    # and the scenario dropdown to run.
+def __(con, mo, scenario):
+    # This cell defines our query function.
     @mo.rerun(on_change=[scenario])
     def run_query():
         multipliers = {
@@ -55,8 +52,7 @@ def __(con, scenario):
             "Expansion": 1.3, "Crisis": 0.3,
         }
         multiplier = multipliers[scenario.value]
-
-        query = f"""
+        query = """
         SELECT
             as_of_month as Date,
             CASE WHEN seller_name = 'UNITED SHORE FINANCIAL SERVICES, LLC' THEN 'UNITED WHOLESALE MORTGAGE, LLC' ELSE seller_name END as seller,
@@ -76,25 +72,20 @@ def __(con, scenario):
         GROUP BY ALL ORDER BY as_of_month LIMIT 2000;
         """
         df = con.sql(query).df()
-
         if not df.empty:
             df['scenario_cpr'] = df['historical_cpr'] * multiplier
-        
         return df
-    return run_query,
+    return run_query
 
 @app.cell
 def __(run_query):
     # This cell calls the query function to get the actual data.
     cpr_data = run_query()
-    return cpr_data,
+    return cpr_data
 
 @app.cell
 def __(cpr_data, mo, px, scenario):
-    # This final cell creates the UI output. It depends on the data,
-    # the scenario dropdown, and the plotting libraries.
-    # We display the dropdown UI output in this cell.
-    scenario_dropdown = scenario
+    # This final cell creates and displays all the UI output.
     
     # Create the figure
     fig = px.line(
@@ -109,9 +100,8 @@ def __(cpr_data, mo, px, scenario):
         "🔢 Data Table": mo.ui.table(cpr_data, page_size=10)
     })
     
-    # Return all UI elements to be displayed
-    return app_view, fig, scenario_dropdown
-
+    # We return all UI elements we want to display in the app's output area
+    return app_view, scenario
 
 # 3. This block allows the script to be run directly
 if __name__ == "__main__":
