@@ -378,112 +378,112 @@ def __(historical_data, forecast_df, go, scenario, mo):
     else:
         r_squared = 0.0
     
-    # Create statistics display
-    @app.cell
-    def __(historical_data, forecast_df, go, scenario, mo, r_squared):
-        # This is the NEW cell for creating KPI cards and the Chart.
-        # We combine them here because they share a lot of the same data.
-        
-        # --- 1. Create KPI Statistics Cards ---
-        
-        # Calculate Trend
-        last_historical = historical_data['cpr'].iloc[-1]
-        first_forecast = forecast_df['cpr_forecast'].iloc[0]
-        trend_direction = "Falling" if first_forecast < last_historical else "Rising"
-        trend_icon = "↘️" if trend_direction == "Falling" else "↗️"
-        
-        # Create individual stat cards
-        kpi_next_cpr = mo.stat(
-            label="Next Month CPR",
-            value=f"{first_forecast:.2%}",
-            caption=f"vs. {last_historical:.2%} historical"
-        )
-        
-        kpi_confidence = mo.stat(
-            label="95% Confidence",
-            value=f"±{ (forecast_df['upper_bound'].iloc[0] - first_forecast):.2% }",
-            caption="based on historical volatility"
-        )
+# Create statistics display
+@app.cell
+def __(historical_data, forecast_df, go, scenario, mo, r_squared):
+    # This is the NEW cell for creating KPI cards and the Chart.
+    # We combine them here because they share a lot of the same data.
+    
+    # --- 1. Create KPI Statistics Cards ---
+    
+    # Calculate Trend
+    last_historical = historical_data['cpr'].iloc[-1]
+    first_forecast = forecast_df['cpr_forecast'].iloc[0]
+    trend_direction = "Falling" if first_forecast < last_historical else "Rising"
+    trend_icon = "↘️" if trend_direction == "Falling" else "↗️"
+    
+    # Create individual stat cards
+    kpi_next_cpr = mo.stat(
+        label="Next Month CPR",
+        value=f"{first_forecast:.2%}",
+        caption=f"vs. {last_historical:.2%} historical"
+    )
+    
+    kpi_confidence = mo.stat(
+        label="95% Confidence",
+        value=f"±{ (forecast_df['upper_bound'].iloc[0] - first_forecast):.2% }",
+        caption="based on historical volatility"
+    )
 
-        kpi_r_squared = mo.stat(
-            label="Model R²",
-            value=f"{r_squared:.3f}",
-            caption="on backtest (placeholder)"
-        )
+    kpi_r_squared = mo.stat(
+        label="Model R²",
+        value=f"{r_squared:.3f}",
+        caption="on backtest (placeholder)"
+    )
 
-        kpi_trend = mo.stat(
-            label="Trend",
-            value=f"{trend_direction} {trend_icon}",
-            caption="vs. last historical month"
-        )
-        
-        # Arrange stats in a row
-        kpi_cards = mo.hstack([
-            kpi_next_cpr, kpi_confidence, kpi_r_squared, kpi_trend
-        ], justify='space-around', gap=2)
+    kpi_trend = mo.stat(
+        label="Trend",
+        value=f"{trend_direction} {trend_icon}",
+        caption="vs. last historical month"
+    )
+    
+    # Arrange stats in a row
+    kpi_cards = mo.hstack([
+        kpi_next_cpr, kpi_confidence, kpi_r_squared, kpi_trend
+    ], justify='space-around', gap=2)
 
 
-        # --- 2. Create Upgraded Interactive Chart ---
+    # --- 2. Create Upgraded Interactive Chart ---
 
-        colors = {
-            'historical': '#3b82f6',  # A nice blue
-            'forecast': '#16a34a',    # A distinct green
-            'confidence_fill': 'rgba(22, 163, 74, 0.1)' # Light green fill
-        }
+    colors = {
+        'historical': '#3b82f6',  # A nice blue
+        'forecast': '#16a34a',    # A distinct green
+        'confidence_fill': 'rgba(22, 163, 74, 0.1)' # Light green fill
+    }
 
-        fig = go.Figure()
+    fig = go.Figure()
 
-        # Confidence interval - MUST be added first for correct layering
-        fig.add_trace(go.Scatter(
-            x=forecast_df['Date'].tolist() + forecast_df['Date'].tolist()[::-1],
-            y=forecast_df['upper_bound'].tolist() + forecast_df['lower_bound'].tolist()[::-1],
-            fill='toself',
-            fillcolor=colors['confidence_fill'],
-            line=dict(color='rgba(255,255,255,0)'),
-            name='95% Confidence Interval',
-            hoverinfo='skip'
-        ))
-        
-        # Historical data - solid line
-        fig.add_trace(go.Scatter(
-            x=historical_data['Date'], y=historical_data['cpr'] * 100,
-            mode='lines+markers', name='Historical CPR',
-            line=dict(color=colors['historical'], width=2.5),
-            marker=dict(size=4),
-            hovertemplate='Date: %{x|%Y-%m}<br>CPR: %{y:.2f}%<extra></extra>'
-        ))
-        
-        # Forecast - dashed line with different color
-        fig.add_trace(go.Scatter(
-            x=forecast_df['Date'], y=forecast_df['cpr_forecast'] * 100,
-            mode='lines+markers', name='Forecast',
-            line=dict(color=colors['forecast'], width=2.5, dash='dash'),
-            marker=dict(size=6, symbol='diamond'),
-            hovertemplate='Date: %{x|%Y-%m}<br>Forecast: %{y:.2f}%<extra></extra>'
-        ))
+    # Confidence interval - MUST be added first for correct layering
+    fig.add_trace(go.Scatter(
+        x=forecast_df['Date'].tolist() + forecast_df['Date'].tolist()[::-1],
+        y=forecast_df['upper_bound'].tolist() + forecast_df['lower_bound'].tolist()[::-1],
+        fill='toself',
+        fillcolor=colors['confidence_fill'],
+        line=dict(color='rgba(255,255,255,0)'),
+        name='95% Confidence Interval',
+        hoverinfo='skip'
+    ))
+    
+    # Historical data - solid line
+    fig.add_trace(go.Scatter(
+        x=historical_data['Date'], y=historical_data['cpr'] * 100,
+        mode='lines+markers', name='Historical CPR',
+        line=dict(color=colors['historical'], width=2.5),
+        marker=dict(size=4),
+        hovertemplate='Date: %{x|%Y-%m}<br>CPR: %{y:.2f}%<extra></extra>'
+    ))
+    
+    # Forecast - dashed line with different color
+    fig.add_trace(go.Scatter(
+        x=forecast_df['Date'], y=forecast_df['cpr_forecast'] * 100,
+        mode='lines+markers', name='Forecast',
+        line=dict(color=colors['forecast'], width=2.5, dash='dash'),
+        marker=dict(size=6, symbol='diamond'),
+        hovertemplate='Date: %{x|%Y-%m}<br>Forecast: %{y:.2f}%<extra></extra>'
+    ))
 
-        # Update layout to professional standard
-        fig.update_layout(
-            title={
-                'text': 'CPR Time Series Forecast', 'font': {'size': 20},
-                'x': 0.5, 'xanchor': 'center'
-            },
-            xaxis_title='Date',
-            yaxis_title='CPR (%)',
-            yaxis_tickformat='.0f', # Show as '20' instead of '20%'
-            plot_bgcolor='white',
-            paper_bgcolor='white',
-            hovermode='x unified',
-            height=450,
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
-            ),
-            margin=dict(l=50, r=20, t=60, b=50),
-            # Use a clean template
-            template='plotly_white'
-        )
-        
-        return kpi_cards, fig, r_squared, trend_direction, first_forecast, last_historical
+    # Update layout to professional standard
+    fig.update_layout(
+        title={
+            'text': 'CPR Time Series Forecast', 'font': {'size': 20},
+            'x': 0.5, 'xanchor': 'center'
+        },
+        xaxis_title='Date',
+        yaxis_title='CPR (%)',
+        yaxis_tickformat='.0f', # Show as '20' instead of '20%'
+        plot_bgcolor='white',
+        paper_bgcolor='white',
+        hovermode='x unified',
+        height=450,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+        ),
+        margin=dict(l=50, r=20, t=60, b=50),
+        # Use a clean template
+        template='plotly_white'
+    )
+    
+    return kpi_cards, fig, r_squared, trend_direction, first_forecast, last_historical
 
 @app.cell
 def __(historical_data, forecast_df, mo, pd):
