@@ -38,6 +38,14 @@ gh repo create Mortgage-Data/mbs_forecaster --public --add-readme --gitignore Py
 <!-- Clone the repo from ~/code: -->
 gh repo clone Mortgage-Data/mbs_forecaster
 
+<!-- Create the venv -->
+python3 -m venv venv
+
 <!-- Start venv:
      from ~/code/mbs_forecaster: -->
 source venv/bin/activate
+
+
+pip install streamlit duckdb pmdarima plotly
+
+streamlit run app.py
