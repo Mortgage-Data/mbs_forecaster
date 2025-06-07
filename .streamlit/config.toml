@@ -1,0 +1,8 @@
+# .streamlit/config.toml
+[theme]
+base="light"                      # “light” or “dark”
+primaryColor="#667eea"            # your purple accent
+backgroundColor="#FFFFFF"         # main canvas background
+secondaryBackgroundColor="#f0f4ff"# sidebar / control panels
+textColor="#111111"
+font="sans serif"
