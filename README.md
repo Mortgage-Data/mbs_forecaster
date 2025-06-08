@@ -13,7 +13,17 @@ This tool provides interactive forecasts for MBS prepayment rates.
     ```bash
     python3 -m venv venv
     source venv/bin/activate
-    pip install -r requirements.txt 
+    # Install core packages first
+    pip install streamlit duckdb pandas numpy plotly statsmodels scikit-learn
+
+    # Install lightgbm separately
+    pip install lightgbm
+
+    # Install prophet (may require additional system dependencies)
+    pip install prophet
+
+    # Install pmdarima with compatibility fix if needed
+    pip install pmdarima --no-cache-dir --force-reinstall
     ``` 
     *(Note: It's good practice to create a `requirements.txt` file with `pip freeze > requirements.txt`)*
 
