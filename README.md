@@ -11,19 +11,23 @@ This tool provides interactive forecasts for MBS prepayment rates.
 
 2.  **Create Environment & Install Dependencies:**
     ```bash
-    python3 -m venv venv
+    # Deactivate current environment
+    deactivate
+
+    # Remove the problematic environment
+    rm -rf venv
+
+    # Create fresh environment
+    python -m venv venv
     source venv/bin/activate
-    # Install core packages first
-    pip install streamlit duckdb pandas numpy plotly statsmodels scikit-learn
 
-    # Install lightgbm separately
-    pip install lightgbm
-
-    # Install prophet (may require additional system dependencies)
-    pip install prophet
-
-    # Install pmdarima with compatibility fix if needed
-    pip install pmdarima --no-cache-dir --force-reinstall
+    # Install packages in specific order to control versions
+    pip install "numpy>=1.24,<2.0"
+    pip install "packaging>=20,<25" 
+    pip install streamlit
+    pip install duckdb plotly
+    pip install pmdarima
+    pip install prophet  # optional
     ``` 
     *(Note: It's good practice to create a `requirements.txt` file with `pip freeze > requirements.txt`)*
 
