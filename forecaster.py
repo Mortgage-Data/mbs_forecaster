@@ -82,7 +82,9 @@ def __(con, pd):
         SUM(credit_score * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_credit_score,
         CASE WHEN SUM(prepayable_balance) > 0 THEN 1 - POWER(1 - (SUM(unscheduled_principal_payment) / SUM(prepayable_balance)), 12) ELSE 0 END as cpr,
         b.pmms30, b.pmms30_1m_lag, b.pmms30_2m_lag
-    FROM main.gse_sf_mbs a LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
+    FROM main.gse_sf_mbs a 
+    LEFT JOIN main.pmms b 
+        ON a.as_of_month = b.as_of_date
     WHERE is_in_bcpr3 AND prefix = 'CL' AND seller_name IN ('UNITED SHORE FINANCIAL SERVICES, LLC', 'UNITED WHOLESALE MORTGAGE, LLC')
     AND as_of_month >= '2022-01-01'
     GROUP BY ALL ORDER BY as_of_month;
