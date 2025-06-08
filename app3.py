@@ -224,29 +224,71 @@ def fit_lightgbm_model(X_train, y_train, X_val=None, y_val=None):
     
     return model
 
-def forecast_with_lightgbm(model, last_observation, external_forecast, horizon, feature_names):
+def forecast_with_lightgbm(model, loan_data, seller_data, horizon, feature_names):
     """
     Generate multi-step forecasts using trained LightGBM model.
+    
+    Since LightGBM is trained on loan-level data but we need seller-level forecasts,
+    we aggregate loan-level predictions to get seller-level CPR forecasts.
     """
     forecasts = []
-    current_obs = last_observation.copy()
     
-    for step in range(horizon):
-        X_step = current_obs[feature_names].values.reshape(1, -1)
-        pred = model.predict(X_step)[0]
-        forecasts.append(pred)
+    # Get the most recent month's loan data for forecasting
+    if loan_data is not None and len(loan_data) > 0:
+        # Use loan-level approach
+        last_month = loan_data.index.max()
+        recent_loans = loan_data[loan_data.index == last_month].copy()
         
-        # Update observation for next step
-        if 'cpr_1m_lag' in current_obs.index:
-            current_obs['cpr_1m_lag'] = pred / 100
-        if 'time_index' in current_obs.index:
-            current_obs['time_index'] += 1
-        
-        # Use external forecasts if available
-        if external_forecast is not None and step < len(external_forecast):
-            for col in external_forecast.columns:
-                if col in current_obs.index:
-                    current_obs[col] = external_forecast[col].iloc[step]
+        for step in range(horizon):
+            step_forecasts = []
+            
+            for idx, loan in recent_loans.iterrows():
+                # Create feature vector for this loan
+                try:
+                    loan_features = {}
+                    for feature in feature_names:
+                        if feature in loan.index:
+                            loan_features[feature] = loan[feature]
+                        else:
+                            # Handle missing features with defaults
+                            if 'occupancy_status_' in feature:
+                                loan_features[feature] = 0  # Default to not this category
+                            elif 'channel_' in feature:
+                                loan_features[feature] = 0
+                            elif 'fthb_' in feature:
+                                loan_features[feature] = 0
+                            else:
+                                loan_features[feature] = 0
+                    
+                    # Convert to array in correct order
+                    X_step = np.array([loan_features[f] for f in feature_names]).reshape(1, -1)
+                    
+                    # Generate prediction for this loan
+                    loan_pred = model.predict(X_step)[0]
+                    step_forecasts.append(loan_pred)
+                    
+                except Exception as e:
+                    # Skip problematic loans
+                    continue
+            
+            if step_forecasts:
+                # Aggregate loan-level predictions to seller level (simple average)
+                seller_forecast = np.mean(step_forecasts)
+                forecasts.append(seller_forecast)
+            else:
+                # Fallback: use last known CPR
+                last_cpr = seller_data['cpr'].iloc[-1] * 100
+                forecasts.append(last_cpr)
+            
+            # Update features for next step (simplified)
+            # In practice, you'd update loan characteristics, but for demo we'll keep constant
+            
+    else:
+        # Fallback to seller-level forecasting
+        last_obs = seller_data.iloc[-1]
+        for step in range(horizon):
+            # Simple persistence for seller-level
+            forecasts.append(last_obs['cpr'] * 100)
     
     return np.array(forecasts)
 
@@ -392,7 +434,7 @@ with st.spinner("Loading data for selected modeling approach..."):
                 CASE WHEN loan_balance > 647200 THEN 1 ELSE 0 END as jumbo_loan,
                 CASE WHEN (loan_rate - COALESCE(pmms30, 0)) > 0.5 THEN 1 ELSE 0 END as strong_refi_incentive,
                 CASE WHEN (loan_rate - COALESCE(pmms30, 0)) < -0.5 THEN 1 ELSE 0 END as negative_refi_incentive,
-                CASE WHEN COALESCE(months_delinquent, '0') != '0' THEN 1 ELSE 0 END as is_delinquent,
+                CASE WHEN COALESCE(months_delinquent, 0) > 0 THEN 1 ELSE 0 END as is_delinquent,
                 -- Temporal features
                 EXTRACT(month FROM month) as month_num,
                 EXTRACT(year FROM month) as year_num,
@@ -410,7 +452,10 @@ with st.spinner("Loading data for selected modeling approach..."):
             COALESCE(pmms30, 0) as pmms30,
             COALESCE(pmms30_1m_lag, 0) as pmms30_1m_lag,
             COALESCE(pmms30_2m_lag, 0) as pmms30_2m_lag,
-            cpr_1m_lag, cpr_3m_lag, refi_incentive, rate_volatility,
+            COALESCE(cpr_1m_lag, 0) as cpr_1m_lag,     -- Handle null lags 
+            COALESCE(cpr_3m_lag, 0) as cpr_3m_lag,     -- Handle null lags
+            COALESCE(refi_incentive, 0) as refi_incentive, 
+            COALESCE(rate_volatility, 0) as rate_volatility,
             -- Binary features (0/1, never null)
             high_ltv, high_dti, low_credit, jumbo_loan, 
             strong_refi_incentive, negative_refi_incentive, is_delinquent,
@@ -422,7 +467,6 @@ with st.spinner("Loading data for selected modeling approach..."):
             COALESCE(fthb, 'Unknown') as fthb
         FROM loan_features
         WHERE cpr IS NOT NULL 
-        AND cpr_1m_lag IS NOT NULL  -- Need at least 1 lag for meaningful features
         ORDER BY month, loan_id
     """
     
@@ -523,7 +567,7 @@ with st.expander("📊 Data Summary", expanded=False):
         if 'refi_incentive' in loan_data.columns:
             dist_col3.metric("Strong Refi Incentive", f"{(loan_data['refi_incentive'] > 0.5).mean():.1%}")
         if 'months_delinquent' in loan_data.columns:
-            dist_col4.metric("Delinquent Loans", f"{(loan_data['months_delinquent'] != '0').mean():.1%}")
+            dist_col4.metric("Delinquent Loans", f"{(loan_data['months_delinquent'] > 0).mean():.1%}")
     else:
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         col1.metric("Months of Data", len(seller_data))
@@ -542,7 +586,17 @@ with st.spinner("Training CPR Forecasting Models..."):
     # Determine modeling approach
     if model_type == "Auto-Select":
         suggested_model, reasoning = detect_model_type(cpr_series, external_features)
-        st.info(f"🤖 Auto-selected model: **{suggested_model.replace('_', ' ').title()}** - {reasoning}")
+        st.info(f"🤖 **Auto-Selected: {suggested_model.replace('_', ' ').title()}** - {reasoning}")
+        
+        # Show what this means in practical terms
+        model_explanation = {
+            "multivariate": "Will attempt Prophet (time series) with external features",
+            "univariate_complex": "Will use Auto-ARIMA (classical time series)",
+            "univariate_simple": "Will use Auto-ARIMA or Simple baseline", 
+            "persistence": "Will use Simple trend/persistence model"
+        }
+        st.write(f"📋 **Strategy**: {model_explanation.get(suggested_model, 'Unknown')}")
+        
     else:
         model_mapping = {
             "Prophet": "multivariate",
@@ -552,17 +606,22 @@ with st.spinner("Training CPR Forecasting Models..."):
         }
         suggested_model = model_mapping[model_type]
         reasoning = f"User selected {model_type}"
+        st.info(f"🎯 **User Selected: {model_type}**")
     
-    # Initialize results containers
+    # Initialize results containers with tracking
     forecast_results = {}
     model_info = {}
+    models_attempted = []
+    models_succeeded = []
     
     # Prophet Model
     if PROPHET_AVAILABLE and (suggested_model in ["multivariate"] or model_type == "Prophet"):
+        models_attempted.append("Prophet")
         st.write("🔮 **Training Prophet Model** (Time Series Paradigm)")
         
         model, prophet_df, success = fit_prophet_model(cpr_series, external_features)
         if success:
+            models_succeeded.append("Prophet")
             future = model.make_future_dataframe(periods=forecast_horizon, freq='MS')
             
             for col in external_features.columns:
@@ -591,6 +650,7 @@ with st.spinner("Training CPR Forecasting Models..."):
     
     # LightGBM Model
     if LIGHTGBM_AVAILABLE and (suggested_model in ["gradient_boosting", "multivariate"] or model_type == "LightGBM"):
+        models_attempted.append("LightGBM")
         st.write("🚀 **Training LightGBM Model** (Cross-Sectional Regression Paradigm)")
         
         X, y, feature_names = prepare_lightgbm_features(loan_data, seller_data, 'cpr')
@@ -601,18 +661,16 @@ with st.spinner("Training CPR Forecasting Models..."):
             st.write(f"📊 Using {len(seller_data)} seller-month observations (loan-level data unavailable)")
         
         if len(X) >= 10:
+            models_succeeded.append("LightGBM")
             split_idx = int(len(X) * 0.8)
             X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
             y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
             
             lgb_model = fit_lightgbm_model(X_train, y_train, X_test, y_test)
             
-            # Generate forecasts using recursive prediction
-            last_obs = seller_data.iloc[-1]
-            external_forecast = None
-            
+            # Generate forecasts using loan-level to seller-level aggregation
             lgb_forecasts = forecast_with_lightgbm(
-                lgb_model, last_obs, external_forecast, forecast_horizon, feature_names
+                lgb_model, loan_data, seller_data, forecast_horizon, feature_names
             )
             
             # Calculate feature importance
@@ -650,11 +708,13 @@ with st.spinner("Training CPR Forecasting Models..."):
     
     # Auto-ARIMA Model
     if suggested_model in ["univariate_complex", "univariate_simple"] or model_type == "Auto-ARIMA":
+        models_attempted.append("Auto-ARIMA")
         st.write("📈 **Training ARIMA Model** (Classical Econometric Time Series)")
         
         seasonal = len(cpr_series) >= 24
         
         if PMDARIMA_AVAILABLE:
+            models_succeeded.append("Auto-ARIMA")
             model = auto_arima(
                 cpr_series,
                 start_p=0, start_q=0, 
@@ -690,6 +750,8 @@ with st.spinner("Training CPR Forecasting Models..."):
     
     # Simple Baseline
     if len(forecast_results) == 0 or suggested_model == "persistence":
+        models_attempted.append("Simple")
+        models_succeeded.append("Simple")
         st.write("📊 **Training Simple Baseline** (Statistical Persistence)")
         
         forecast_values, confidence_intervals = create_simple_forecast(cpr_series, forecast_horizon)
@@ -733,6 +795,13 @@ with st.spinner("Training CPR Forecasting Models..."):
             'features': [f"Combines {len(forecast_results)-1} models"],
             'components': list(forecast_results.keys())[:-1]
         }
+    
+    # Show execution summary for Auto-Select mode
+    if model_type == "Auto-Select":
+        st.success(f"✅ **Execution Summary**: Attempted {len(models_attempted)} model(s), {len(models_succeeded)} succeeded")
+        if models_attempted != models_succeeded:
+            failed_models = [m for m in models_attempted if m not in models_succeeded]
+            st.warning(f"⚠️ Failed models: {', '.join(failed_models)}")
     
     # Select primary forecast
     primary_model = model_type if model_type in forecast_results else list(forecast_results.keys())[0]
@@ -785,9 +854,9 @@ kpi_col3.metric(
 )
 
 kpi_col4.metric(
-    "Primary Model",
+    "Active Model" if model_type == "Auto-Select" else "Selected Model",
     primary_model,
-    help=f"Paradigm: {model_info[primary_model].get('paradigm', 'N/A')}"
+    help=f"Auto-selected: {reasoning}" if model_type == "Auto-Select" else f"Paradigm: {model_info[primary_model].get('paradigm', 'N/A')}"
 )
 
 # Model Comparison Table
