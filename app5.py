@@ -427,7 +427,20 @@ with st.spinner("Loading and preparing data..."):
     if len(seller_data) > 0:
         seller_data['month'] = pd.to_datetime(seller_data['month'])
         seller_data = seller_data.set_index('month').sort_index()
-        st.success(f"✅ Loaded {len(seller_data)} months of seller-level data for modeling.")
+        
+        # FIX: Drop rows with NaN values created by SQL LAG functions.
+        # This ensures all models receive clean, complete data.
+        initial_rows = len(seller_data)
+        seller_data = seller_data.dropna()
+        final_rows = len(seller_data)
+        
+        if final_rows > 0:
+            st.success(f"✅ Prepared {final_rows} months of clean seller-level data for modeling.")
+            if initial_rows > final_rows:
+                st.info(f"ℹ️ Dropped {initial_rows - final_rows} initial row(s) that had missing lag data.")
+        else:
+            st.error("❌ After cleaning, no data remained for modeling. The time series may be too short.")
+            st.stop()
     else:
         st.error(f"❌ No seller-level data found for {selected_seller}. Cannot proceed.")
         st.stop()
@@ -495,17 +508,31 @@ with st.spinner("Training models and generating forecasts..."):
         st.write("🔮 **Training Prophet Model** (Time Series Decomposition)")
         model, prophet_df, success = fit_prophet_model(cpr_series, external_features.drop(columns=['month','year','time_index'], errors='ignore'))
         if success:
+            # Create a dataframe with historical and future dates
             future = model.make_future_dataframe(periods=forecast_horizon, freq='MS')
-            # Project future regressors by carrying the last value forward
-            for col in external_features.columns:
-                if col not in ['cpr', 'month', 'year', 'time_index']:
-                    future[col] = pd.concat([prophet_df[col], pd.Series([prophet_df[col].iloc[-1]] * forecast_horizon)], ignore_index=True)
 
+            # --- NEW, ROBUST REGRESSOR PROJECTION LOGIC ---
+            
+            # Get the list of columns to use as regressors
+            regressor_cols = [col for col in external_features.columns if col not in ['cpr', 'month', 'year', 'time_index']]
+            
+            # Create a dataframe of historical regressors with a 'ds' column for merging
+            historical_regressors = external_features[regressor_cols].reset_index().rename(columns={'month': 'ds'})
+            
+            # Join the future dates with the historical regressor values
+            future = pd.merge(future, historical_regressors, on='ds', how='left')
+            
+            # Use forward-fill to project the last known values into the future
+            future[regressor_cols] = future[regressor_cols].fillna(method='ffill')
+            
+            # --- END OF NEW LOGIC ---
+
+            # Now, generate the forecast with clean future data
             forecast = model.predict(future)
             forecast_values = forecast['yhat'].tail(forecast_horizon).values
             
             forecast_results['Prophet'] = {'values': forecast_values, 'confidence': forecast[['yhat_lower', 'yhat_upper']].tail(forecast_horizon).values}
-            model_info['Prophet'] = {'type': 'Prophet', 'paradigm': 'Time Series Decomposition', 'score': 'N/A', 'features': external_features.columns.tolist()}
+            model_info['Prophet'] = {'type': 'Prophet', 'paradigm': 'Time Series Decomposition', 'score': 'N/A', 'features': regressor_cols}
             st.success("✅ Prophet model trained.")
 
     # Model 3: Auto-ARIMA

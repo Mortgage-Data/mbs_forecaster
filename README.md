@@ -1,6 +1,9 @@
 # mbs_forecaster - MBS CPR Time Series Forecasting Tool
 This tool provides interactive forecasts for MBS prepayment rates.
 
+# Usage
+streamlit run app4.py
+
 ## Setup
 
 1.  **Clone the Repository:**
