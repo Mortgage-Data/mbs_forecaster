@@ -1,51 +1,3 @@
-Thank you for the feedback that BCPR3 predictions are now running but producing incorrect values. The issue lies in the calculation of BCPR3, which, according to the Fannie Mae Benchmark CPR whitepaper (pages 2-4), is not a direct CPR3 value but a **ratio** comparing a seller’s (or servicer’s) CPR3 to the CPR3 of a cohort, defined over a 24-month issuance window with at least two months of seasoning. Additionally, you’ve specified that:
-
-1. The `WHERE` clause for both the numerator (seller’s CPR3) and denominator (cohort’s CPR3) should include `prefix = 'CL'` to align with the whitepaper’s requirements for BCPR3 (page 3, footnote 2).
-2. The denominator cohort should be restricted to the **top 100 sellers** (by some metric, e.g., loan count or UPB), with plans to refactor later to allow a choice between `seller_name` or `servicer_name`.
-
-You also asked me to double-check your idea about restricting the denominator to the top 100 sellers. The whitepaper (page 4, Exhibit 2) refers to the cohort as the entire Fannie Mae or Freddie Mac reference population for BCPR3, without explicitly limiting it to the top 100 sellers. However, your suggestion to restrict the cohort to the top 100 sellers makes sense in the context of computational efficiency and relevance, as it focuses on the most significant market participants. I’ll implement this restriction but note that it’s a customization beyond the whitepaper’s definition, which we can revisit if needed.
-
-The current SQL query in `app6.py` calculates BCPR3 as a direct CPR value for the selected seller’s loans (filtered by `is_in_bcpr3`), not as a ratio. To fix this, we need to:
-
-1. Compute the **numerator CPR3** for the selected seller’s loans, filtered by `prefix = 'CL'` and `is_in_bcpr3`.
-2. Compute the **denominator CPR3** for a cohort of the top 100 sellers, also filtered by `prefix = 'CL'` and `is_in_bcpr3`.
-3. Calculate BCPR3 as the **ratio** of the seller’s CPR3 to the cohort’s CPR3, expressed as a percentage (e.g., 100% indicates alignment with the cohort, per page 4).
-4. Ensure the query remains modular to support future refactoring for `seller_name` or `servicer_name`.
-
-Below, I’ll provide an updated `app6.py` that corrects the BCPR3 calculation, applies the `prefix = 'CL'` filter, restricts the cohort to the top 100 sellers (by loan count), and maintains compatibility with the existing CPR and CPR3 predictions. I’ll also structure the query to facilitate future toggling between `seller_name` and `servicer_name`.
-
-### Solution Approach
-
-1. **BCPR3 as a Ratio**:
-   - Modify the `bcpr_data` CTE to compute the seller’s CPR3 (numerator) using the three-month SMM average, filtered by `is_in_bcpr3` and `prefix = 'CL'`.
-   - Add a new CTE to compute the cohort’s CPR3 (denominator) for the top 100 sellers, using the same filters.
-   - Calculate BCPR3 as `seller_cpr3 / cohort_cpr3 * 100` in the final `SELECT`.
-
-2. **Top 100 Sellers**:
-   - Create a CTE to identify the top 100 sellers by loan count over the past 6 months, filtered by `is_in_bcpr3` and `prefix = 'CL'`.
-   - Use this list to restrict the cohort in the denominator calculation.
-
-3. **Prefix Filter**:
-   - Ensure `prefix = 'CL'` is applied in the `base_data` and `bcpr_data` CTEs for CPR3 and BCPR3 calculations, aligning with the whitepaper (page 3).
-
-4. **Future Refactoring**:
-   - Use a parameterized approach in the query to reference `entity` (currently `seller_name`, later `seller_name` or `servicer_name`), making it easier to toggle.
-   - Update the UI to prepare for an entity selector (`Seller` or `Servicer`).
-
-5. **Error Handling**:
-   - Retain the existing checks for missing columns and null data, with user-friendly messages to diagnose issues with BCPR3 (e.g., no cohort data for the selected loan purpose).
-
-### Assumptions
-- The `is_in_bcpr3` column correctly identifies loans in the 24-month issuance window with at least two months of seasoning (whitepaper, page 3).
-- The top 100 sellers are determined by loan count (`SUM(1)`) over the past 6 months, consistent with the `sellers_query`. If you prefer another metric (e.g., UPB), let me know.
-- The database schema includes `seller_name`, `servicer_prefix` (assumed for future servicer calculations), and other fields (`loan_purpose`, `prefix`, etc.).
-- Note rate adjustments (whitepaper, page 4) are not implemented due to missing note rate bucket data.
-
-### Updated Code
-
-Below is the updated `app6.py`, with the revised `seller_level_query` and minor UI enhancements to support BCPR3 as a ratio and future entity toggling.
-
-<xai_species artifact_id="7c91b3f5-536b-492c-aaeb-3ee725ad84d5" artifact_version_id="f9a7d2e4-c5b4-4e2c-b3d1-7e9b3c43f8e0" title="app6.py" contentType="text/python">
 import streamlit as st
 import duckdb
 import pandas as pd
@@ -418,7 +370,7 @@ with st.spinner("Loading and preparing data..."):
         WITH month_scaffold AS (
             SELECT DISTINCT DATE_TRUNC('month', as_of_month) as month
             FROM main.gse_sf_mbs
-            WHERE as_of_month >= '2022-01-01'
+            WHERE as_of_month >= '2021-10-01'
         ),
         top_sellers AS (
             SELECT 
@@ -458,7 +410,7 @@ with st.spinner("Loading and preparing data..."):
             FROM main.gse_sf_mbs a 
             LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
             WHERE is_in_bcpr3 AND prefix = 'CL' AND {where_clause}
-            AND as_of_month >= '2022-01-01' AND loan_correction_indicator != 'pri'
+            AND as_of_month >= '2021-10-01' AND loan_correction_indicator != 'pri'
             GROUP BY DATE_TRUNC('month', as_of_month)
         ),
         smm_averages AS (
@@ -486,7 +438,7 @@ with st.spinner("Loading and preparing data..."):
             LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
             WHERE is_in_bcpr3 AND prefix = 'CL'
             AND a.seller_name IN (SELECT seller_name FROM top_sellers)
-            AND as_of_month >= '2022-01-01' AND loan_correction_indicator != 'pri'
+            AND as_of_month >= '2021-10-01' AND loan_correction_indicator != 'pri'
             GROUP BY DATE_TRUNC('month', as_of_month)
         ),
         cohort_smm_averages AS (
@@ -569,6 +521,8 @@ with st.spinner("Loading and preparing data..."):
     if len(seller_data) > 0:
         seller_data['month'] = pd.to_datetime(seller_data['month'])
         seller_data = seller_data.set_index('month').sort_index()
+        # Keep the 2021 data for calculations, but trim it before modeling/plotting
+        seller_data = seller_data.loc['2022-01-01':]
         
         target_col = target_variable.lower()
         if target_col not in seller_data.columns:
@@ -598,7 +552,12 @@ with st.spinner("Loading and preparing data..."):
         st.error(f"❌ No seller-level data found for {selected_seller} ({selected_loan_purpose}). Cannot proceed.")
         st.stop()
 
-series = seller_data[target_col] * 100
+# CPR/CPR3 are decimals (e.g., 0.05), but BCPR3 is already a percentage (e.g., 110)
+if target_variable == 'BCPR3':
+    series = seller_data[target_col]
+else:
+    series = seller_data[target_col] * 100
+
 if series.isna().all():
     st.error(f"❌ No valid data for {target_variable} in the selected period for {selected_seller} ({selected_loan_purpose}). "
              f"Please try a different loan purpose or seller.")
@@ -755,9 +714,9 @@ next_month_val = forecast_df['forecast'].iloc[0]
 delta = next_month_val - current_val
 ci_width = forecast_df['upper_CI'].iloc[0] - forecast_df['lower_CI'].iloc[0]
 
-kpi_col1.metric(f"Next-Month {target_variable}", f"{next_month_val:.1f}%", f"{delta:+.1f}pp vs current")
-kpi_col2.metric("Confidence Range (95%)", f"±{ci_width/2:.1f}pp", help=f"The 95% confidence interval for the next month's {target_variable} forecast.")
-kpi_col3.metric(f"Current {target_variable}", f"{current_val:.1f}%", help=f"The most recently observed {target_variable} value.")
+kpi_col1.metric(f"Next-Month {target_variable}", f"{next_month_val:.2f}%", f"{delta:+.2f}pp vs current")
+kpi_col2.metric("Confidence Range (95%)", f"±{ci_width/2:.2f}pp", help=f"The 95% confidence interval for the next month's {target_variable} forecast.")
+kpi_col3.metric(f"Current {target_variable}", f"{current_val:.2f}%", help=f"The most recently observed {target_variable} value.")
 kpi_col4.metric("Active Model", primary_model, help=model_info[primary_model]['paradigm'])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -765,8 +724,10 @@ kpi_col4.metric("Active Model", primary_model, help=model_info[primary_model]['p
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=series.index, y=series.values, mode='lines+markers', name=f'Historical {target_variable}', line=dict(color='#667eea', width=3)))
-fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df['forecast'], mode='lines+markers', name=f'{primary_model} Forecast', line=dict(color='#20c997', width=3, dash='dash')))
+fig.add_trace(go.Scatter(x=series.index, y=series.values, mode='lines+markers', name=f'Historical {target_variable}', line=dict(color='#667eea', width=3), hovertemplate='%{y:.2f}%'))
+fig.add_trace(go.Scatter(x=forecast_df.index, y=forecast_df['forecast'], mode='lines+markers', name=f'{primary_model} Forecast', line=dict(color='#20c997', width=3, dash='dash'), hovertemplate='%{y:.2f}%'))
+
+
 fig.add_trace(go.Scatter(x=list(forecast_df.index) + list(forecast_df.index[::-1]),
                          y=list(forecast_df['upper_CI']) + list(forecast_df['lower_CI'][::-1]),
                          fill='toself', fillcolor='rgba(32, 201, 151, 0.2)', line=dict(color='rgba(255,255,255,0)'),
@@ -797,88 +758,3 @@ with st.expander("🔧 Model Diagnostics & Feature Analysis"):
         st.json({f: int(v) for f, v in zip(info['features'], lgb_model.feature_importances_)})
 
 st.markdown('</div>', unsafe_allow_html=True)
-</xaiArtifact>
-
-### Key Changes Explained
-
-1. **BCPR3 as a Ratio**:
-   - Added CTEs (`cohort_data`, `cohort_smm_averages`, `cohort_cpr3`) to compute the cohort’s CPR3 for the top 100 sellers:
-     ```sql
-     cohort_data AS (
-         SELECT 
-             DATE_TRUNC('month', as_of_month) as month,
-             CASE WHEN SUM(prepayable_balance) > 0 
-                 THEN SUM(unscheduled_principal_payment) / SUM(prepayable_balance) 
-                 ELSE 0 END as cohort_smm
-         FROM main.gse_sf_mbs a 
-         LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
-         WHERE is_in_bcpr3 AND prefix = 'CL'
-         AND a.seller_name IN (SELECT seller_name FROM top_sellers)
-         AND as_of_month >= '2022-01-01' AND loan_correction_indicator != 'pri'
-         GROUP BY DATE_TRUNC('month', as_of_month)
-     )
-     ```
-   - Calculated BCPR3 as `sm.cpr3 / cc.cohort_cpr3 * 100`:
-     ```sql
-     CASE WHEN cc.cohort_cpr3 > 0 THEN (sm.cpr3 / cc.cohort_cpr3 * 100) ELSE 0 END as bcpr3
-     ```
-
-2. **Top 100 Sellers**:
-   - Added `top_sellers` CTE to identify the top 100 sellers by loan count:
-     ```sql
-     top_sellers AS (
-         SELECT 
-             CASE 
-                 WHEN seller_name = 'UNITED SHORE FINANCIAL SERVICES, LLC' THEN 'UNITED WHOLESALE MORTGAGE, LLC' 
-                 ELSE seller_name 
-             END as seller_name,
-             COUNT(*) as loan_count
-         FROM main.gse_sf_mbs
-         WHERE is_in_bcpr3 AND prefix = 'CL'
-         AND as_of_month >= date_trunc('month', now()) - interval '6 months'
-         GROUP BY 1
-         ORDER BY loan_count DESC
-         LIMIT 100
-     )
-     ```
-
-3. **Prefix Filter**:
-   - Ensured `prefix = 'CL'` is applied in `base_data`, `seller_cpr3`, and `cohort_data` CTEs, aligning with the whitepaper.
-
-4. **Modular Structure**:
-   - Structured CTEs to reference `seller_name`, preparing for a future `entity_type` parameter (`seller_name` or `servicer_name`).
-   - Kept `where_clause` dynamic for `loan_purpose` and other potential filters.
-
-5. **Error Handling**:
-   - Retained checks for missing `target_col` and null `series`:
-     ```python
-     if target_col not in seller_data.columns:
-         st.error(f"❌ Target column '{target_col}' not found in data...")
-     if series.isna().all():
-         st.error(f"❌ No valid data for {target_variable}...")
-     ```
-
-### Notes for Testing and Future Enhancements
-
-- **Testing**:
-  - Verify BCPR3 values are now ratios (e.g., ~100% indicates alignment with the cohort, per whitepaper page 4).
-  - Check the `seller_data` preview to ensure `bcpr3` is populated with percentages (e.g., 100, 130, 170) and matches `cpr3 / cohort_cpr3 * 100`.
-  - Test with different `loan_purpose` values to confirm cohort CPR3 is calculated correctly.
-
-- **Debugging**:
-  - If BCPR3 values still seem off, inspect `seller_data[['cpr3', 'bcpr3']]` to compare seller CPR3 and BCPR3.
-  - Run the `cohort_cpr3` CTE independently to validate cohort CPR3 values.
-
-- **Future Refactoring**:
-  - Add a dropdown for `entity_type` (`Seller` or `Servicer`):
-    ```python
-    entity_type = st.selectbox("Select Entity Type", ["Seller", "Servicer"])
-    entity_column = 'seller_name' if entity_type == "Seller" else 'servicer_name'
-    ```
-    Update the query to use `entity_column` dynamically.
-  - Consider note rate adjustments if bucket data is available (whitepaper, pages 7-9).
-
-- **Performance**:
-  - The `top_sellers` and `cohort_data` CTEs may increase query time. If slow, index `main.gse_sf_mbs` on `seller_name`, `prefix`, `is_in_bcpr3`, and `as_of_month`.
-
-Please test this updated code and confirm if BCPR3 values now align with expectations. If issues persist, sharing a sample of `seller_data` (e.g., `cpr3` and `bcpr3` columns) or specific incorrect values could help diagnose further. Let me know if you need assistance with the seller/servicer refactoring or other enhancements!
