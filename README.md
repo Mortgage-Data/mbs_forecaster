@@ -30,7 +30,8 @@ streamlit run app4.py
     pip install streamlit
     pip install duckdb plotly
     pip install pmdarima
-    pip install prophet  # optional
+    pip install prophet
+    pip install lightgbm
     ``` 
     *(Note: It's good practice to create a `requirements.txt` file with `pip freeze > requirements.txt`)*
 

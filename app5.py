@@ -1,5 +1,4 @@
 # app.py
-# usage: streamlit run app.py
 
 import streamlit as st
 import duckdb
@@ -8,6 +7,8 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.io as pio
 import warnings
+import traceback
+
 warnings.filterwarnings('ignore')
 
 # Modern time series and machine learning libraries
@@ -25,16 +26,24 @@ try:
 except ImportError:
     PROPHET_AVAILABLE = False
 
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+# Detect LightGBM availability and capture any import error
 try:
     import lightgbm as lgb
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
     LIGHTGBM_AVAILABLE = True
-except ImportError:
+    LIGHTGBM_IMPORT_ERROR = None
+except Exception as e:
     LIGHTGBM_AVAILABLE = False
+    LIGHTGBM_IMPORT_ERROR = e
 
 # Fallback to statsmodels if needed
 import statsmodels.api as sm
+
+# at the very top, after imports
+forecast_results = None
+fallback_reason  = None
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SETUP & CONFIGURATION
@@ -105,22 +114,18 @@ def prepare_seller_level_features(seller_data, target_col='cpr'):
     """
     df = seller_data.copy()
     
-    # Temporal features from the index
+    # Temporal features from the index (month and year are already in SQL query if needed)
     df['month'] = df.index.month
     df['year'] = df.index.year
-    df['time_index'] = range(len(df))
     
-    # Cyclical encoding for seasonality
-    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
-    
-    # Select features - these are columns already calculated in the SQL query
+    # Select features - these are columns already calculated in the SQL query or derived
     feature_cols = [
         'weighted_avg_rate', 'weighted_avg_ltv', 'weighted_avg_dti', 'weighted_avg_credit_score',
-        'pmms30', 'pmms30_1m_lag', 'pmms30_2m_lag',
-        'cpr_1m_lag', 'cpr_3m_lag', 'cpr_6m_avg',
+        'pmms30', 'pmms30_1m_lag', 'pmms30_2m_lag', 'cpr_6m_avg',
+        'cpr_1m_lag', 'cpr_3m_lag',
         'refi_incentive', 'rate_volatility',
-        'month_sin', 'month_cos', 'time_index'
+        'month_sin', 'month_cos', 'time_index',
+        'pmms30_trend'
     ]
     
     # Ensure all selected feature columns exist in the dataframe, use only available ones
@@ -163,6 +168,62 @@ def fit_lightgbm_model(X_train, y_train, X_val, y_val):
     
     return model
 
+# def forecast_with_lightgbm(model, seller_data, horizon, feature_names):
+#     """
+#     Generate forecasts using the trained LightGBM model.
+#     This function iteratively predicts one step at a time.
+#     """
+#     # Start with the last known observation from the seller data
+#     last_obs = seller_data.iloc[-1:].copy()
+    
+#     # Verify that required columns exist
+#     required_cols = ['time_index', 'pmms30_trend']  # Add pmms30_trend to required columns
+#     missing_cols = [col for col in required_cols if col not in last_obs.columns]
+#     if missing_cols:
+#         raise ValueError(f"Columns {missing_cols} not found in seller_data. Ensure they are included in the SQL query.")
+    
+#     forecasts = []
+    
+#     for i in range(horizon):
+#         # Prepare the feature set for the next period
+#         future_features = last_obs.copy()
+#         future_features.index = last_obs.index + pd.DateOffset(months=1)
+        
+#         # Update time-based features
+#         future_features['month'] = future_features.index.month
+#         future_features['year'] = future_features.index.year
+#         current_time_index = future_features['time_index'].iloc[0]  # Extract scalar value
+#         future_features['time_index'] = current_time_index + 1     # Increment and assign
+#         future_features['month_sin'] = np.sin(2 * np.pi * future_features['month'] / 12)
+#         future_features['month_cos'] = np.cos(2 * np.pi * future_features['month'] / 12)
+
+#         # Update lagged CPR features with the previous prediction
+#         if i == 0:
+#             future_features['cpr_1m_lag'] = last_obs['cpr'].iloc[0]
+#             future_features['cpr_3m_lag'] = seller_data['cpr'].iloc[-3] if len(seller_data) >= 3 else last_obs['cpr'].iloc[0]
+#         else:
+#             future_features['cpr_1m_lag'] = forecasts[-1] / 100.0  # Convert back to ratio
+#             if i >= 3:
+#                 future_features['cpr_3m_lag'] = forecasts[-3] / 100.0
+#             else:
+#                 future_features['cpr_3m_lag'] = seller_data['cpr'].iloc[-3+i]
+
+#         # Keep pmms30_trend constant (persistence) for now
+#         # Other external features (like pmms30) also remain constant
+        
+#         # Ensure the feature vector has the same columns in the same order as the training data
+#         X_step = future_features[feature_names]
+        
+#         # Generate prediction
+#         prediction = model.predict(X_step)[0]
+#         prediction = max(0.1, min(50.0, prediction))  # Bound the prediction
+#         forecasts.append(prediction)
+        
+#         # Update last_obs for the next iteration
+#         last_obs = future_features
+#         last_obs['cpr'] = prediction / 100.0  # Update CPR with the new prediction
+
+#     return np.array(forecasts)
 def forecast_with_lightgbm(model, seller_data, horizon, feature_names):
     """
     Generate forecasts using the trained LightGBM model.
@@ -171,7 +232,15 @@ def forecast_with_lightgbm(model, seller_data, horizon, feature_names):
     # Start with the last known observation from the seller data
     last_obs = seller_data.iloc[-1:].copy()
     
+    # Verify that required columns exist
+    required_cols = ['time_index', 'pmms30_trend']
+    missing_cols = [col for col in required_cols if col not in last_obs.columns]
+    if missing_cols:
+        raise ValueError(f"Columns {missing_cols} not found in seller_data. Ensure they are included in the SQL query.")
+    
     forecasts = []
+    last_trend_values = seller_data['pmms30_trend'].tail(3).values  # Last 3 months for trend
+    trend_slope = np.mean(np.diff(last_trend_values)) if len(last_trend_values) > 1 else 0
     
     for i in range(horizon):
         # Prepare the feature set for the next period
@@ -181,36 +250,36 @@ def forecast_with_lightgbm(model, seller_data, horizon, feature_names):
         # Update time-based features
         future_features['month'] = future_features.index.month
         future_features['year'] = future_features.index.year
-        future_features['time_index'] += 1
+        current_time_index = future_features['time_index'].iloc[0]
+        future_features['time_index'] = current_time_index + 1
         future_features['month_sin'] = np.sin(2 * np.pi * future_features['month'] / 12)
         future_features['month_cos'] = np.cos(2 * np.pi * future_features['month'] / 12)
 
         # Update lagged CPR features with the previous prediction
         if i == 0:
             future_features['cpr_1m_lag'] = last_obs['cpr'].iloc[0]
-            future_features['cpr_3m_lag'] = seller_data['cpr'].iloc[-3] if len(seller_data) >=3 else last_obs['cpr'].iloc[0]
+            future_features['cpr_3m_lag'] = seller_data['cpr'].iloc[-3] if len(seller_data) >= 3 else last_obs['cpr'].iloc[0]
         else:
-            future_features['cpr_1m_lag'] = forecasts[-1] / 100.0 # convert back to ratio
+            future_features['cpr_1m_lag'] = forecasts[-1] / 100.0
             if i >= 3:
-                # Use a mix of historical and forecasted lags
                 future_features['cpr_3m_lag'] = forecasts[-3] / 100.0
             else:
                 future_features['cpr_3m_lag'] = seller_data['cpr'].iloc[-3+i]
 
-        # For other external features (like pmms30), assume they stay constant (persistence)
-        # A more complex model would forecast these features as well
+        # Propagate pmms30_trend based on historical trend
+        future_features['pmms30_trend'] = last_obs['pmms30_trend'].iloc[0] + trend_slope * (i + 1)
         
         # Ensure the feature vector has the same columns in the same order as the training data
         X_step = future_features[feature_names]
         
         # Generate prediction
         prediction = model.predict(X_step)[0]
-        prediction = max(0.1, min(50.0, prediction)) # Bound the prediction
+        prediction = max(0.1, min(50.0, prediction))
         forecasts.append(prediction)
         
         # Update last_obs for the next iteration
         last_obs = future_features
-        last_obs['cpr'] = prediction / 100.0 # Update CPR with the new prediction
+        last_obs['cpr'] = prediction / 100.0
 
     return np.array(forecasts)
 
@@ -224,12 +293,14 @@ def fit_prophet_model(cpr_data, external_features=None):
             'y': cpr_data.values
         })
         
+        # --- START OF FIX: Fine-tuning Prophet's hyperparameters for stability ---
         model = Prophet(
-            seasonality_mode='multiplicative',
+            seasonality_mode='additive',      # More stable for series that don't have huge swings
+            changepoint_prior_scale=0.05,     # Makes the trend more stable, less prone to overfitting
+            seasonality_prior_scale=5.0,      # Reduces the magnitude of the seasonal swings
             yearly_seasonality=True,
             weekly_seasonality=False,
             daily_seasonality=False,
-            changepoint_prior_scale=0.1,
             interval_width=0.95
         )
         
@@ -343,7 +414,8 @@ seller_info_query = f"""
         MIN(as_of_month),
         MAX(as_of_month)
     FROM main.gse_sf_mbs 
-    WHERE is_in_bcpr3 AND prefix = 'CL' AND {seller_where_clause} AND loan_correction_indicator != 'pri';
+    WHERE is_in_bcpr3 AND prefix = 'CL' AND {seller_where_clause} AND loan_correction_indicator != 'pri'
+    AND as_of_month >= '2022-01-01';
 """
 seller_info = con.execute(seller_info_query).fetchone()
 st.info(f"📊 **{selected_seller}**: {seller_info[0]:,} total loan observations across {seller_info[1]} months "
@@ -360,11 +432,12 @@ if not run_prediction:
 with st.spinner("Loading and preparing data..."):
     
     # Query 1: Loan-level data (only if needed for diagnostics, not for modeling)
+    # CASE WHEN prepayable_balance > 0 THEN 1 - POWER(1 - (unscheduled_principal_payment / prepayable_balance), 12) ELSE 0 END as cpr,
     loan_level_query = f"""
         SELECT 
             loan_identifier as loan_id,
             DATE_TRUNC('month', as_of_month) as month,
-            CASE WHEN prepayable_balance > 0 THEN 1 - POWER(1 - (unscheduled_principal_payment / prepayable_balance), 12) ELSE 0 END as cpr,
+            cpr,
             current_interest_rate_pri as loan_rate,
             ltv, credit_score,
             loan_rate - COALESCE(pmms30, 0) as refi_incentive,
@@ -381,35 +454,38 @@ with st.spinner("Loading and preparing data..."):
     # Query 2: Seller-level aggregated data for all time series models
     seller_level_query = f"""
         WITH seller_monthly AS (
-            SELECT 
-                DATE_TRUNC('month', as_of_month) as month,
-                SUM(1) as loan_count,
-                SUM(current_investor_loan_upb) as total_upb,
-                SUM(current_interest_rate_pri * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_rate,
-                SUM(ltv * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_ltv,
-                SUM(dti * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_dti,
-                SUM(credit_score * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_credit_score,
-                CASE WHEN SUM(prepayable_balance) > 0 
-                     THEN 1 - POWER(1 - (SUM(unscheduled_principal_payment) / SUM(prepayable_balance)), 12) 
-                     ELSE 0 END as cpr,
-                AVG(pmms30) as pmms30,
-                AVG(pmms30_1m_lag) as pmms30_1m_lag,
-                AVG(pmms30_2m_lag) as pmms30_2m_lag
-            FROM main.gse_sf_mbs a 
-            LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
-            WHERE is_in_bcpr3 AND prefix = 'CL' AND {seller_where_clause}
-            AND as_of_month >= '2020-01-01' AND loan_correction_indicator != 'pri'
-            GROUP BY 1
-            HAVING loan_count >= 100
-        )
-        SELECT *,
-            LAG(cpr, 1) OVER (ORDER BY month) as cpr_1m_lag,
-            LAG(cpr, 3) OVER (ORDER BY month) as cpr_3m_lag,
-            AVG(cpr) OVER (ORDER BY month ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING) as cpr_6m_avg,
-            weighted_avg_rate - pmms30 as refi_incentive,
-            ABS(pmms30 - pmms30_1m_lag) as rate_volatility
-        FROM seller_monthly
-        ORDER BY month
+                SELECT 
+                    DATE_TRUNC('month', as_of_month) as month,
+                    SUM(1) as loan_count,
+                    SUM(current_investor_loan_upb) as total_upb,
+                    SUM(current_interest_rate_pri * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_rate,
+                    SUM(ltv * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_ltv,
+                    SUM(dti * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_dti,
+                    SUM(credit_score * current_investor_loan_upb) / SUM(current_investor_loan_upb) as weighted_avg_credit_score,
+                    CASE WHEN SUM(prepayable_balance) > 0 
+                        THEN 1 - POWER(1 - (SUM(unscheduled_principal_payment) / SUM(prepayable_balance)), 12) 
+                        ELSE 0 END as cpr,
+                    AVG(pmms30) as pmms30,
+                    AVG(pmms30_1m_lag) as pmms30_1m_lag,
+                    AVG(pmms30_2m_lag) as pmms30_2m_lag,
+                    ROW_NUMBER() OVER (ORDER BY DATE_TRUNC('month', as_of_month)) - 1 as time_index,
+                    SIN(2 * PI() * EXTRACT(MONTH FROM DATE_TRUNC('month', as_of_month)) / 12) as month_sin,
+                    COS(2 * PI() * EXTRACT(MONTH FROM DATE_TRUNC('month', as_of_month)) / 12) as month_cos
+                FROM main.gse_sf_mbs a 
+                LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
+                WHERE is_in_bcpr3 AND prefix = 'CL' AND {seller_where_clause}
+                AND as_of_month >= '2022-01-01' AND loan_correction_indicator != 'pri'
+                GROUP BY DATE_TRUNC('month', as_of_month)
+            )
+            SELECT *,
+                LAG(cpr, 1) OVER (ORDER BY month) as cpr_1m_lag,
+                LAG(cpr, 3) OVER (ORDER BY month) as cpr_3m_lag,
+                AVG(cpr) OVER (ORDER BY month ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING) as cpr_6m_avg,
+                AVG(pmms30) OVER (ORDER BY month ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) as pmms30_trend,
+                weighted_avg_rate - pmms30 as refi_incentive,
+                ABS(pmms30 - pmms30_1m_lag) as rate_volatility
+            FROM seller_monthly
+            ORDER BY month
     """
     
     loan_data = None
@@ -423,6 +499,7 @@ with st.spinner("Loading and preparing data..."):
 
     st.info("📊 Loading seller-level aggregate data for modeling...")
     seller_data = con.execute(seller_level_query).df()
+    st.write(f"Debug: Columns in seller_data: {seller_data.columns.tolist()}")
     
     if len(seller_data) > 0:
         seller_data['month'] = pd.to_datetime(seller_data['month'])
@@ -451,7 +528,7 @@ cpr_series = seller_data['cpr'] * 100
 # Prepare feature set for Prophet/LightGBM
 external_features = seller_data.drop(columns=['cpr', 'loan_count', 'total_upb']).copy()
 
-# ✨ NEW: Data Preview Expander
+# Data Preview Expander
 with st.expander("📊 Data Preview"):
     st.write("**Seller-Level Aggregated Data (used for modeling):**")
     st.dataframe(seller_data.head())
@@ -475,84 +552,125 @@ with st.spinner("Training models and generating forecasts..."):
     forecast_results = {}
     model_info = {}
 
+    fallback_reason = None
+
+    # initialize a variable to capture *why* we ended up here
+    fallback_reason = None
+    
     # Model 1: LightGBM
     if LIGHTGBM_AVAILABLE and suggested_model == "gradient_boosting":
         st.write("🚀 **Training LightGBM Model** (Gradient Boosting)")
         try:
             X, y, feature_names = prepare_seller_level_features(seller_data, 'cpr')
-            if len(X) > 24: # Need enough data to split
-                split_idx = int(len(X) * 0.8)
-                X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-                y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+            st.info(f"ℹ️ After preparing features for LightGBM, {len(X)} data points are available for training.")
 
-                lgb_model = fit_lightgbm_model(X_train, y_train, X_test, y_test)
-                lgb_forecasts = forecast_with_lightgbm(lgb_model, seller_data, forecast_horizon, feature_names)
-                
-                val_preds = lgb_model.predict(X_test)
-                rmse = np.sqrt(mean_squared_error(y_test, val_preds))
-                residual_std = np.std(y_test - val_preds)
-                margin = min(residual_std * 1.96, 5.0) # Cap CI width
-                
-                forecast_results['LightGBM'] = {'values': lgb_forecasts, 'confidence': np.array([[f-margin, f+margin] for f in lgb_forecasts])}
-                top_features = pd.Series(lgb_model.feature_importances_, index=feature_names).sort_values(ascending=False)
-                model_info['LightGBM'] = {'type': 'LightGBM', 'paradigm': 'Gradient Boosting', 'score': f"{rmse:.2f} RMSE", 'features': top_features.index[:5].tolist()}
-                st.success("✅ LightGBM model trained.")
+            if len(X) > 12:
+                # Train/test split
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+                st.info(f"ℹ️ Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+                # Train LightGBM model with adjusted parameters
+                params = {
+                    'objective': 'regression',
+                    'metric': 'rmse',
+                    'boosting_type': 'gbdt',
+                    'num_leaves': 31,
+                    'learning_rate': 0.01,
+                    'feature_fraction': 0.9,  # Increased to use more features
+                    'reg_alpha': 0.1,
+                    'reg_lambda': 0.1,
+                    'random_state': 42,
+                    'verbose': -1,
+                    'n_estimators': 2000,
+                    'max_depth': 10  # Added to control tree depth
+                }
+                lgb_model = lgb.LGBMRegressor(**params)
+                lgb_model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_test, y_test)],
+                    eval_metric='rmse',
+                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+                )
+                st.info("ℹ️ LightGBM model training completed.")
+                # Generate forecasts
+                forecast_values = forecast_with_lightgbm(lgb_model, seller_data, forecast_horizon, feature_names)
+                st.info(f"ℹ️ Generated {len(forecast_values)} forecast values.")
+                # Confidence interval
+                residuals = y_test - lgb_model.predict(X_test)
+                margin = np.std(residuals) * 1.96  # 95% CI
+                conf_int = np.array([[max(0, v - margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)],
+                                    [min(100, v + margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)]]).T
+                forecast_results['LightGBM'] = {'values': forecast_values, 'confidence': conf_int}
+                model_info['LightGBM'] = {
+                    'type': 'LightGBM',
+                    'paradigm': 'Gradient Boosting',
+                    'score': f"RMSE: {np.sqrt(mean_squared_error(y_test, lgb_model.predict(X_test))):.2f}",
+                    'features': feature_names
+                }
+                # Display feature importances
+                importances = lgb_model.feature_importances_
+                if len(importances) != len(feature_names):
+                    st.warning("⚠️ Mismatch between feature importances and feature names. Check data alignment.")
+                feature_importance_dict = {f: int(i) for f, i in zip(feature_names, importances)}
+                st.write("**Top 5 Features by Importance:**")
+                st.json(dict(sorted(feature_importance_dict.items(), key=lambda x: x[1], reverse=True)[:5]))
+                st.success("✅ LightGBM model trained and forecast generated.")
             else:
-                st.warning("⚠️ Insufficient data for LightGBM training (need > 24 months).")
+                fallback_reason = f"Insufficient data for LightGBM: only {len(X)} data points (need >12)."
+                st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
         except Exception as e:
-            st.error(f"LightGBM failed: {e}")
-
+            fallback_reason = f"Exception in LightGBM: {str(e)}\nTraceback: {traceback.format_exc()}"
+            st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
 
     # Model 2: Prophet
-    if PROPHET_AVAILABLE and suggested_model == "multivariate":
-        st.write("🔮 **Training Prophet Model** (Time Series Decomposition)")
-        model, prophet_df, success = fit_prophet_model(cpr_series, external_features.drop(columns=['month','year','time_index'], errors='ignore'))
+    elif PROPHET_AVAILABLE and suggested_model == "multivariate":
+        # (The Prophet code from our previous fix goes here - no changes needed to it)
+        prophet_regressors = [ 'refi_incentive', 'rate_volatility', 'weighted_avg_credit_score' ]
+        final_prophet_regressors = [col for col in prophet_regressors if col in external_features.columns]
+        st.write(f"🔮 **Training Prophet Model** with curated regressors: `{', '.join(final_prophet_regressors)}`")
+        model, prophet_df, success = fit_prophet_model(cpr_series, external_features[final_prophet_regressors])
         if success:
-            # Create a dataframe with historical and future dates
             future = model.make_future_dataframe(periods=forecast_horizon, freq='MS')
-
-            # --- NEW, ROBUST REGRESSOR PROJECTION LOGIC ---
-            
-            # Get the list of columns to use as regressors
-            regressor_cols = [col for col in external_features.columns if col not in ['cpr', 'month', 'year', 'time_index']]
-            
-            # Create a dataframe of historical regressors with a 'ds' column for merging
-            historical_regressors = external_features[regressor_cols].reset_index().rename(columns={'month': 'ds'})
-            
-            # Join the future dates with the historical regressor values
+            historical_regressors = external_features[final_prophet_regressors].reset_index().rename(columns={'month': 'ds'})
             future = pd.merge(future, historical_regressors, on='ds', how='left')
-            
-            # Use forward-fill to project the last known values into the future
-            future[regressor_cols] = future[regressor_cols].fillna(method='ffill')
-            
-            # --- END OF NEW LOGIC ---
-
-            # Now, generate the forecast with clean future data
+            future[final_prophet_regressors] = future[final_prophet_regressors].fillna(method='ffill')
             forecast = model.predict(future)
             forecast_values = forecast['yhat'].tail(forecast_horizon).values
-            
+            forecast_values[forecast_values < 0] = 0
             forecast_results['Prophet'] = {'values': forecast_values, 'confidence': forecast[['yhat_lower', 'yhat_upper']].tail(forecast_horizon).values}
-            model_info['Prophet'] = {'type': 'Prophet', 'paradigm': 'Time Series Decomposition', 'score': 'N/A', 'features': regressor_cols}
+            model_info['Prophet'] = {'type': 'Prophet', 'paradigm': 'Time Series Decomposition', 'score': 'N/A', 'features': final_prophet_regressors}
             st.success("✅ Prophet model trained.")
 
     # Model 3: Auto-ARIMA
-    if PMDARIMA_AVAILABLE and "univariate" in suggested_model:
+    elif PMDARIMA_AVAILABLE and "univariate" in suggested_model:
         st.write("📈 **Training Auto-ARIMA Model** (Classical Econometrics)")
         seasonal = len(cpr_series) >= 24
         model = auto_arima(cpr_series, seasonal=seasonal, m=12 if seasonal else 1, suppress_warnings=True, error_action='ignore', stepwise=True)
-        
         forecast_values, conf_int = model.predict(n_periods=forecast_horizon, return_conf_int=True)
         forecast_results['Auto-ARIMA'] = {'values': forecast_values, 'confidence': conf_int}
         model_info['Auto-ARIMA'] = {'type': f'ARIMA{model.order}', 'paradigm': 'Econometric Time Series', 'score': f"{model.aic():.1f} AIC", 'features': ['Lagged CPR']}
         st.success(f"✅ Auto-ARIMA model trained: {model.order}")
 
     # Fallback: Simple Model
-    if not forecast_results or suggested_model == "persistence":
+    if not forecast_results:  # Check if forecast_results is empty
+        st.warning("🔄 Fallback to Simple model: No forecasts generated by selected model.")
+        if not LIGHTGBM_AVAILABLE:
+            st.error(f"❌ LightGBM unavailable: {LIGHTGBM_IMPORT_ERROR}")
+        elif fallback_reason:
+            st.info(f"ℹ️ Fallback reason: {fallback_reason}")
+        else:
+            st.info(f"ℹ️ Fallback reason: Suggested model ({suggested_model}) did not produce results.")
+
         st.write("📊 **Using Simple Baseline Model**")
+        st.info("Using simple trend-based forecast as primary or fallback.")
+
         forecast_values, conf_int = create_simple_forecast(cpr_series, forecast_horizon)
         forecast_results['Simple'] = {'values': forecast_values, 'confidence': conf_int}
-        model_info['Simple'] = {'type': 'Simple Trend', 'paradigm': 'Statistical Baseline', 'score': 'N/A', 'features': ['Recent Trend']}
-        st.info("📈 Using simple trend-based forecast as primary or fallback.")
+        model_info['Simple'] = {
+            'type': 'Simple Trend',
+            'paradigm': 'Statistical Baseline',
+            'score': 'N/A',
+            'features': ['Recent Trend']
+        }
 
     if not forecast_results:
         st.error("❌ All models failed to produce a forecast. Cannot continue.")
