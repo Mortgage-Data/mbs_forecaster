@@ -267,6 +267,7 @@ with st.expander("📊 Model Configuration", expanded=True):
             FROM main.gse_sf_mbs 
             WHERE is_in_bcpr3 AND prefix = 'CL' 
             AND as_of_month >= date_trunc('month', now()) - interval '6 months'
+            AND loan_correction_indicator != 'pri'
             GROUP BY 1
             HAVING COUNT(*) >= 1000
             ORDER BY COUNT(*) DESC
@@ -290,6 +291,7 @@ with st.expander("📊 Model Configuration", expanded=True):
             WHERE is_in_bcpr3 AND prefix = 'CL' 
             AND as_of_month >= date_trunc('month', now()) - interval '6 months'
             AND loan_purpose IS NOT NULL
+            AND loan_correction_indicator != 'pri'
             ORDER BY loan_purpose;
         """
         try:
@@ -331,7 +333,8 @@ seller_info_query = f"""
         MIN(as_of_month),
         MAX(as_of_month)
     FROM main.gse_sf_mbs 
-    WHERE is_in_bcpr3 AND prefix = 'CL' AND {where_clause} AND loan_correction_indicator != 'pri'
+    WHERE is_in_bcpr3 AND prefix = 'CL' AND {where_clause} 
+    AND loan_correction_indicator != 'pri'
     AND as_of_month >= '2022-01-01';
 """
 seller_info = con.execute(seller_info_query).fetchone()
@@ -410,7 +413,8 @@ with st.spinner("Loading and preparing data..."):
             FROM main.gse_sf_mbs a 
             LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
             WHERE is_in_bcpr3 AND prefix = 'CL' AND {where_clause}
-            AND as_of_month >= '2021-10-01' AND loan_correction_indicator != 'pri'
+            AND as_of_month >= '2021-10-01' 
+            AND loan_correction_indicator != 'pri'
             GROUP BY DATE_TRUNC('month', as_of_month)
         ),
         smm_averages AS (
