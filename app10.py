@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import warnings
 import traceback
+from sklearn.preprocessing import MinMaxScaler
 
 warnings.filterwarnings('ignore')
 
@@ -45,7 +46,7 @@ fallback_reason = None
 
 st.set_page_config(
     page_title="MBS CPR Forecaster",
-    page_icon="images/Logo-37.ico",
+    page_icon="images/Polygon-purple-trspt.ico",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -95,28 +96,63 @@ def detect_model_type(series, external_features=None):
         return "persistence", "Data appears stable/flat."
 
 def prepare_seller_level_features(seller_data, target_col='cpr'):
+    """
+    Prepare features for LightGBM modeling, including lagged values, rolling statistics, and relative features.
+    Target variable is always scaled to percentage (0-100) for consistency.
+    """
     df = seller_data.copy()
-    
+    target_values = df[target_col] * 100 if target_col in ['cpr', 'cpr3'] else df[target_col]
+
+    # Time-based features
     df['month'] = df.index.month
     df['year'] = df.index.year
-    
-    feature_cols = [
+    df['time_index'] = np.arange(len(df))
+    df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+    df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+
+    # Lagged features (in percent)
+    for lag in [1, 3, 6]:
+        df[f'{target_col}_{lag}m_lag'] = (df[target_col] * 100 if target_col in ['cpr', 'cpr3'] else df[target_col]).shift(lag)
+
+    # Rolling statistics (in percent)
+    df[f'{target_col}_6m_avg'] = (df[target_col] * 100 if target_col in ['cpr', 'cpr3'] else df[target_col]).rolling(window=6).mean()
+    df[f'{target_col}_6m_std'] = (df[target_col] * 100 if target_col in ['cpr', 'cpr3'] else df[target_col]).rolling(window=6).std()
+
+    # Rate-based and relative features
+    df['refi_incentive'] = df['weighted_avg_rate'] - df['pmms30']
+    df['rate_volatility'] = df['pmms30'].diff().abs()
+    df['pmms30_trend'] = df['pmms30'].rolling(window=3).mean()
+    df['rate_trend'] = df['weighted_avg_rate'].rolling(window=3).mean()
+    df['refi_incentive_ratio'] = df['refi_incentive'] / df['weighted_avg_rate']
+    df['ltv_ratio'] = df['weighted_avg_ltv'] / 100
+
+    # Feature selection
+    base_feature_cols = [
         'weighted_avg_rate', 'weighted_avg_ltv', 'weighted_avg_dti', 'weighted_avg_credit_score',
-        'pmms30', 'pmms30_1m_lag', 'pmms30_2m_lag', f'{target_col}_6m_avg',
-        f'{target_col}_1m_lag', f'{target_col}_3m_lag',
-        'refi_incentive', 'rate_volatility',
+        'pmms30', 'pmms30_1m_lag', 'pmms30_2m_lag',
         'month_sin', 'month_cos', 'time_index',
-        'pmms30_trend'
+        'refi_incentive', 'rate_volatility',
+        'pmms30_trend', 'rate_trend',
+        'refi_incentive_ratio', 'ltv_ratio'
     ]
-    
-    available_feature_cols = [col for col in feature_cols if col in df.columns]
-    
-    df = df.dropna(subset=[target_col] + available_feature_cols)
-    
-    X = df[available_feature_cols]
-    y = df[target_col] * 100
-    
-    return X, y, available_feature_cols
+    target_feature_cols = [
+        f'{target_col}_1m_lag', f'{target_col}_3m_lag', f'{target_col}_6m_lag',
+        f'{target_col}_6m_avg', f'{target_col}_6m_std'
+    ]
+    all_feature_cols = base_feature_cols + target_feature_cols
+    available_feature_cols = [col for col in all_feature_cols if col in df.columns]
+
+    # Feature scaling
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    X = df[available_feature_cols].fillna(method='ffill').fillna(method='bfill')
+    X_scaled = scaler.fit_transform(X)
+
+    # Remove rows with missing target values
+    valid_idx = ~target_values.isna()
+    X_scaled = X_scaled[valid_idx]
+    y = target_values[valid_idx]
+    return X_scaled, y, available_feature_cols, scaler
 
 def fit_lightgbm_model(X_train, y_train, X_val, y_val):
     params = {
@@ -144,50 +180,76 @@ def fit_lightgbm_model(X_train, y_train, X_val, y_val):
     
     return model
 
-def forecast_with_lightgbm(model, seller_data, horizon, feature_names, target_col='cpr'):
+def forecast_with_lightgbm(model, seller_data, horizon, feature_names, scaler, target_col='cpr'):
+    """
+    Generate LightGBM forecasts for a given horizon, using the last available observation and updating lagged/rolling features.
+    """
     last_obs = seller_data.iloc[-1:].copy()
-    
-    required_cols = ['time_index', 'pmms30_trend']
-    missing_cols = [col for col in required_cols if col not in last_obs.columns]
-    if missing_cols:
-        raise ValueError(f"Columns {missing_cols} not found in seller_data.")
-    
     forecasts = []
-    last_trend_values = seller_data['pmms30_trend'].tail(3).values
-    trend_slope = np.mean(np.diff(last_trend_values)) if len(last_trend_values) > 1 else 0
-    
-    for i in range(horizon):
-        future_features = last_obs.copy()
-        future_features.index = last_obs.index + pd.DateOffset(months=1)
-        
-        future_features['month'] = future_features.index.month
-        future_features['year'] = future_features.index.year
-        current_time_index = future_features['time_index'].iloc[0]
-        future_features['time_index'] = current_time_index + 1
-        future_features['month_sin'] = np.sin(2 * np.pi * future_features['month'] / 12)
-        future_features['month_cos'] = np.cos(2 * np.pi * future_features['month'] / 12)
-        
-        if i == 0:
-            future_features[f'{target_col}_1m_lag'] = last_obs[target_col].iloc[0]
-            future_features[f'{target_col}_3m_lag'] = seller_data[target_col].iloc[-3] if len(seller_data) >= 3 else last_obs[target_col].iloc[0]
+    current_features = pd.DataFrame(index=last_obs.index)
+
+    # Initialize all required features
+    for col in feature_names:
+        if col in last_obs.columns:
+            current_features[col] = last_obs[col]
         else:
-            future_features[f'{target_col}_1m_lag'] = forecasts[-1] / 100.0
-            if i >= 3:
-                future_features[f'{target_col}_3m_lag'] = forecasts[-3] / 100.0
+            if col == 'time_index':
+                current_features[col] = len(seller_data)
+            elif col == 'month_sin':
+                current_features[col] = np.sin(2 * np.pi * last_obs.index.month[0] / 12)
+            elif col == 'month_cos':
+                current_features[col] = np.cos(2 * np.pi * last_obs.index.month[0] / 12)
+            elif col == 'rate_trend':
+                current_features[col] = seller_data['weighted_avg_rate'].rolling(window=3).mean().iloc[-1]
+            elif col == 'pmms30_trend':
+                current_features[col] = seller_data['pmms30'].rolling(window=3).mean().iloc[-1]
+            elif col == 'refi_incentive':
+                current_features[col] = last_obs['weighted_avg_rate'].iloc[0] - last_obs['pmms30'].iloc[0]
+            elif col == 'rate_volatility':
+                current_features[col] = seller_data['pmms30'].diff().abs().iloc[-1]
+            elif col == 'refi_incentive_ratio':
+                current_features[col] = (last_obs['weighted_avg_rate'].iloc[0] - last_obs['pmms30'].iloc[0]) / last_obs['weighted_avg_rate'].iloc[0]
+            elif col == 'ltv_ratio':
+                current_features[col] = last_obs['weighted_avg_ltv'].iloc[0] / 100
             else:
-                future_features[f'{target_col}_3m_lag'] = seller_data[target_col].iloc[-3+i]
-        
-        future_features['pmms30_trend'] = last_obs['pmms30_trend'].iloc[0] + trend_slope * (i + 1)
-        
-        X_step = future_features[feature_names]
-        
-        prediction = model.predict(X_step)[0]
+                current_features[col] = 0
+
+    # Use percent scale for lagged features
+    recent_values = (seller_data[target_col] * 100 if target_col in ['cpr', 'cpr3'] else seller_data[target_col]).tail(6).values
+
+    for i in range(horizon):
+        # Update time-based features
+        future_month = last_obs.index[0] + pd.DateOffset(months=i+1)
+        current_features['month'] = future_month.month
+        current_features['month_sin'] = np.sin(2 * np.pi * future_month.month / 12)
+        current_features['month_cos'] = np.cos(2 * np.pi * future_month.month / 12)
+        current_features['time_index'] = len(seller_data) + i
+
+        # Update lagged features (percent scale)
+        if i == 0:
+            current_features[f'{target_col}_1m_lag'] = recent_values[-1]
+            current_features[f'{target_col}_3m_lag'] = recent_values[-3] if len(recent_values) >= 3 else recent_values[-1]
+            current_features[f'{target_col}_6m_lag'] = recent_values[-6] if len(recent_values) >= 6 else recent_values[-1]
+        else:
+            current_features[f'{target_col}_1m_lag'] = forecasts[-1]
+            current_features[f'{target_col}_3m_lag'] = forecasts[-3] if i >= 3 else recent_values[-3+i]
+            current_features[f'{target_col}_6m_lag'] = forecasts[-6] if i >= 6 else recent_values[-6+i]
+
+        # Update rolling statistics (percent scale)
+        if i == 0:
+            current_features[f'{target_col}_6m_avg'] = np.mean(recent_values)
+            current_features[f'{target_col}_6m_std'] = np.std(recent_values)
+        else:
+            vals = forecasts[-6:] if len(forecasts) >= 6 else forecasts + [recent_values[-1]]
+            current_features[f'{target_col}_6m_avg'] = np.mean(vals)
+            current_features[f'{target_col}_6m_std'] = np.std(vals)
+
+        # Fill any remaining NaN values
+        current_features = current_features.fillna(method='ffill').fillna(method='bfill').fillna(0)
+        current_features_scaled = scaler.transform(current_features[feature_names])
+        prediction = model.predict(current_features_scaled)[0]
         prediction = max(0.1, min(50.0, prediction))
         forecasts.append(prediction)
-        
-        last_obs = future_features
-        last_obs[target_col] = prediction / 100.0
-    
     return np.array(forecasts)
 
 def fit_prophet_model(series, external_features=None, target_col='cpr'):
@@ -196,28 +258,35 @@ def fit_prophet_model(series, external_features=None, target_col='cpr'):
             'ds': series.index,
             'y': series.values
         })
-        
+        scaler = None
+        if external_features is not None and not external_features.empty:
+            # Min-max scale the regressors
+            scaler = MinMaxScaler()
+            scaled_features = scaler.fit_transform(external_features)
+            scaled_external = pd.DataFrame(scaled_features, columns=external_features.columns, index=external_features.index)
+            for col in scaled_external.columns:
+                if col != target_col:
+                    prophet_df[col] = scaled_external[col].values
+        else:
+            scaled_external = external_features
         model = Prophet(
             seasonality_mode='additive',
-            changepoint_prior_scale=0.05,
+            changepoint_prior_scale=0.2,
             seasonality_prior_scale=5.0,
             yearly_seasonality=True,
             weekly_seasonality=False,
             daily_seasonality=False,
             interval_width=0.95
         )
-        
-        if external_features is not None:
-            for col in external_features.columns:
+        if scaled_external is not None:
+            for col in scaled_external.columns:
                 if col != target_col:
                     model.add_regressor(col)
-                    prophet_df[col] = external_features[col].values
-        
         model.fit(prophet_df)
-        return model, prophet_df, True
+        return model, prophet_df, scaler, True
     except Exception as e:
         st.warning(f"Prophet failed: {str(e)[:100]}...")
-        return None, None, False
+        return None, None, None, False
 
 def create_simple_forecast(series, horizon):
     recent_values = series.tail(6)
@@ -649,7 +718,7 @@ external_features = seller_data.drop(columns=['cpr', 'cpr3', 'bcpr3', 'loan_coun
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MODEL TRAINING & FORECASTING
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 with st.spinner("Training models and generating forecasts..."):
     
@@ -672,51 +741,54 @@ with st.spinner("Training models and generating forecasts..."):
     if LIGHTGBM_AVAILABLE and suggested_model == "gradient_boosting":
         status_container.write(f"🚀 **Training LightGBM Model** (Gradient Boosting) for {target_variable}")
         try:
-            X, y, feature_names = prepare_seller_level_features(seller_data, target_col)
-            st.info(f"ℹ️ After preparing features for LightGBM, {len(X)} data points are available for training.")
+            X_scaled, y, feature_names, scaler = prepare_seller_level_features(seller_data, target_col)
+            st.info(f"ℹ️ After preparing features for LightGBM, {len(X_scaled)} data points are available for training.")
 
-            if len(X) > 12:
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                st.info(f"ℹ️ Training set size: {len(X_train)}, Test set size: {len(X_test)}")
-                params = {
-                    'objective': 'regression',
-                    'metric': 'rmse',
-                    'boosting_type': 'gbdt',
-                    'num_leaves': 31,
-                    'learning_rate': 0.01,
-                    'feature_fraction': 0.9,
-                    'reg_alpha': 0.1,
-                    'reg_lambda': 0.1,
-                    'random_state': 42,
-                    'verbose': -1,
-                    'n_estimators': 2000,
-                    'max_depth': 10
-                }
-                lgb_model = lgb.LGBMRegressor(**params)
-                lgb_model.fit(
-                    X_train, y_train,
-                    eval_set=[(X_test, y_test)],
-                    eval_metric='rmse',
-                    callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
-                )
-                status_container.info("ℹ️ LightGBM model training completed.")
-                forecast_values = forecast_with_lightgbm(lgb_model, seller_data, forecast_horizon, feature_names, target_col)
-                status_container.info(f"ℹ️ Generated {len(forecast_values)} forecast values.")
-                residuals = y_test - lgb_model.predict(X_test)
-                margin = np.std(residuals) * 1.96
-                conf_int = np.array([[max(0, v - margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)],
-                                    [min(100, v + margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)]]).T
-                forecast_results['LightGBM'] = {'values': forecast_values, 'confidence': conf_int}
-                model_info['LightGBM'] = {
-                    'type': 'LightGBM',
-                    'paradigm': 'Gradient Boosting',
-                    'score': f"RMSE: {np.sqrt(mean_squared_error(y_test, lgb_model.predict(X_test))):.2f}",
-                    'features': feature_names
-                }
-                status_container.success("✅ LightGBM model trained and forecast generated.")
-            else:
-                fallback_reason = f"Insufficient data for LightGBM: only {len(X)} data points (need >12)."
-                st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
+            # Time-based split for time series forecasting
+            # Use first 80% for training, last 20% for testing
+            split_idx = int(len(X_scaled) * 0.8)
+            X_train, X_test = X_scaled[:split_idx], X_scaled[split_idx:]
+            y_train, y_test = y[:split_idx], y[split_idx:]
+            st.info(f"ℹ️ Training set size: {len(X_train)}, Test set size: {len(X_test)}")
+            params = {
+                'objective': 'regression',
+                'metric': 'rmse',
+                'boosting_type': 'gbdt',
+                'num_leaves': 31,
+                'learning_rate': 0.01,
+                'feature_fraction': 0.8,
+                'reg_alpha': 0.5,
+                'reg_lambda': 0.5,
+                'random_state': 42,
+                'verbose': -1,
+                'n_estimators': 2000,
+                'max_depth': 5,
+                'min_child_samples': 20,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8
+            }
+            lgb_model = lgb.LGBMRegressor(**params)
+            lgb_model.fit(
+                X_train, y_train,
+                eval_set=[(X_test, y_test)],
+                eval_metric='rmse',
+                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)]
+            )
+            status_container.info("ℹ️ LightGBM model training completed.")
+            forecast_values = forecast_with_lightgbm(lgb_model, seller_data, forecast_horizon, feature_names, scaler, target_col)
+            status_container.info(f"ℹ️ Generated {len(forecast_values)} forecast values.")
+            residuals = y_test - lgb_model.predict(X_test)
+            margin = np.std(residuals) * 1.96
+            conf_int = np.array([[max(0, v - margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)],
+                                [min(100, v + margin * (1 + i * 0.1)) for i, v in enumerate(forecast_values)]]).T
+            forecast_results['LightGBM'] = {'values': forecast_values, 'confidence': conf_int}
+            model_info['LightGBM'] = {
+                'type': 'LightGBM',
+                'paradigm': 'Gradient Boosting',
+                'score': f"RMSE: {np.sqrt(mean_squared_error(y_test, lgb_model.predict(X_test))):.2f}",
+                'features': feature_names
+            }
+            status_container.success("✅ LightGBM model trained and forecast generated.")
         except Exception as e:
             fallback_reason = f"Exception in LightGBM: {str(e)}\nTraceback: {traceback.format_exc()}"
             st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
@@ -725,11 +797,17 @@ with st.spinner("Training models and generating forecasts..."):
         prophet_regressors = ['refi_incentive', 'rate_volatility', 'weighted_avg_credit_score']
         final_prophet_regressors = [col for col in prophet_regressors if col in external_features.columns]
         st.write(f"🔮 **Training Prophet Model** with regressors: `{', '.join(final_prophet_regressors)}` for {target_variable}")
-        model, prophet_df, success = fit_prophet_model(series, external_features[final_prophet_regressors], target_col)
+        model, prophet_df, scaler, success = fit_prophet_model(series, external_features[final_prophet_regressors], target_col)
         if success:
             future = model.make_future_dataframe(periods=forecast_horizon, freq='MS')
             historical_regressors = external_features[final_prophet_regressors].reset_index().rename(columns={'month': 'ds'})
             future = pd.merge(future, historical_regressors, on='ds', how='left')
+            # Min-max scale the future regressors using the same scaler
+            if scaler is not None:
+                # Only scale the columns used as regressors
+                future_regressors = future[final_prophet_regressors]
+                scaled_future = scaler.transform(future_regressors)
+                future[final_prophet_regressors] = scaled_future
             future[final_prophet_regressors] = future[final_prophet_regressors].fillna(method='ffill')
             forecast = model.predict(future)
             forecast_values = forecast['yhat'].tail(forecast_horizon).values
@@ -781,7 +859,7 @@ with st.spinner("Training models and generating forecasts..."):
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # METRICS & RESULTS DISPLAY
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 st.markdown("---")
 st.subheader(f"Forecast Results for {selected_seller} ({selected_loan_purpose})")
 
@@ -822,7 +900,7 @@ with col1:
         delta=f"{delta:+.2f}pp vs. current"
     )
 
-# Row 2: Current CPR/CPR3/BCPR3
+# Row 2: Current CPR/CPR3
 col1, col2 = st.columns(2)
 with col1:
     # Use the correctly scaled display value
@@ -853,7 +931,7 @@ with col2:
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FORECAST VISUALIZATION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 fig = go.Figure()
 fig.add_trace(go.Scatter(x=series.index, y=series.values, mode='lines+markers', name=f'Historical {target_variable}', line=dict(color='#667eea', width=3), hovertemplate='%{y:.2f}%'))
@@ -874,7 +952,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MODEL DIAGNOSTICS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 with st.expander("🔧 Model Diagnostics & Feature Analysis"):
 
     st.write("#### Data Preview")
