@@ -2,7 +2,8 @@
 This tool provides interactive forecasts for MBS prepayment rates.
 
 # Usage
-streamlit run app4.py
+source venv/bin/activate
+streamlit run app10.py
 
 ## Setup
 
