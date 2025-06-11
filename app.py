@@ -19,10 +19,10 @@ except ImportError as e:
     PMDARIMA_ERROR = str(e)
 
 try:
-    from prophet import Prophet
-    PROPHET_AVAILABLE = True
+    from neuralprophet import NeuralProphet
+    NEURALPROPHET_AVAILABLE = True
 except ImportError:
-    PROPHET_AVAILABLE = False
+    NEURALPROPHET_AVAILABLE = False
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error
@@ -252,41 +252,49 @@ def forecast_with_lightgbm(model, seller_data, horizon, feature_names, scaler, t
         forecasts.append(prediction)
     return np.array(forecasts)
 
-def fit_prophet_model(series, external_features=None, target_col='cpr'):
+def fit_neuralprophet_model(series, external_features=None, target_col='cpr'):
     try:
-        prophet_df = pd.DataFrame({
+        # Prepare data for NeuralProphet
+        df = pd.DataFrame({
             'ds': series.index,
             'y': series.values
         })
-        scaler = None
-        if external_features is not None and not external_features.empty:
-            # Min-max scale the regressors
-            scaler = MinMaxScaler()
-            scaled_features = scaler.fit_transform(external_features)
-            scaled_external = pd.DataFrame(scaled_features, columns=external_features.columns, index=external_features.index)
-            for col in scaled_external.columns:
-                if col != target_col:
-                    prophet_df[col] = scaled_external[col].values
-        else:
-            scaled_external = external_features
-        model = Prophet(
-            seasonality_mode='additive',
-            changepoint_prior_scale=0.2,
-            seasonality_prior_scale=5.0,
+        
+        # Initialize NeuralProphet model
+        model = NeuralProphet(
+            growth="linear",
+            changepoints=None,
+            n_changepoints=5,
+            changepoints_range=0.8,
+            trend_reg=0.05,
+            trend_reg_threshold=False,
             yearly_seasonality=True,
             weekly_seasonality=False,
             daily_seasonality=False,
-            interval_width=0.95
+            seasonality_mode='additive',
+            seasonality_reg=0.1,
+            n_lags=3,
+            n_forecasts=1,
+            learning_rate=0.001,
+            epochs=50,
+            batch_size=64,
+            loss_func="mse",
+            optimizer="AdamW"
         )
-        if scaled_external is not None:
-            for col in scaled_external.columns:
+        
+        # Add external regressors if available
+        if external_features is not None and not external_features.empty:
+            for col in external_features.columns:
                 if col != target_col:
-                    model.add_regressor(col)
-        model.fit(prophet_df)
-        return model, prophet_df, scaler, True
+                    df[col] = external_features[col].values
+                    model.add_lagged_regressor(col, n_lags=3)
+        
+        # Fit the model
+        model.fit(df, freq='MS')
+        return model, df, True
     except Exception as e:
-        st.warning(f"Prophet failed: {str(e)[:100]}...")
-        return None, None, None, False
+        st.warning(f"NeuralProphet failed: {str(e)[:100]}...")
+        return None, None, False
 
 def create_simple_forecast(series, horizon):
     recent_values = series.tail(6)
@@ -404,7 +412,7 @@ with st.expander("📊 Model Configuration", expanded=True):
         target_variable = st.selectbox("Target Variable", ["CPR", "CPR3", "BCPR3"], help="Choose the prepayment metric to predict.")
     with row2_col3:
         model_type = st.selectbox("Model Type",
-                                 ["Auto-Select", "LightGBM (Gradient Boosting)", "Prophet (Time Series)", "Auto-ARIMA (Classical)", "Simple (Baseline)"],
+                                 ["Auto-Select", "LightGBM (Gradient Boosting)", "NeuralProphet (Time Series)", "Auto-ARIMA (Classical)", "Simple (Baseline)"],
                                  help="Choose modeling paradigm.")
     with row2_col4:
         st.write("") # Spacer
@@ -728,7 +736,7 @@ with st.spinner("Training models and generating forecasts..."):
     else:
         model_map = {
             "LightGBM (Gradient Boosting)": "gradient_boosting",
-            "Prophet (Time Series)": "multivariate",
+            "NeuralProphet (Time Series)": "multivariate",
             "Auto-ARIMA (Classical)": "univariate_complex",
             "Simple (Baseline)": "persistence"
         }
@@ -793,28 +801,64 @@ with st.spinner("Training models and generating forecasts..."):
             fallback_reason = f"Exception in LightGBM: {str(e)}\nTraceback: {traceback.format_exc()}"
             st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
 
-    elif PROPHET_AVAILABLE and suggested_model == "multivariate":
-        prophet_regressors = ['refi_incentive', 'rate_volatility', 'weighted_avg_credit_score']
-        final_prophet_regressors = [col for col in prophet_regressors if col in external_features.columns]
-        st.write(f"🔮 **Training Prophet Model** with regressors: `{', '.join(final_prophet_regressors)}` for {target_variable}")
-        model, prophet_df, scaler, success = fit_prophet_model(series, external_features[final_prophet_regressors], target_col)
+    elif NEURALPROPHET_AVAILABLE and suggested_model == "multivariate":
+        neuralprophet_regressors = ['refi_incentive', 'rate_volatility', 'weighted_avg_credit_score']
+        final_neuralprophet_regressors = [col for col in neuralprophet_regressors if col in external_features.columns]
+        st.write(f"🔮 **Training NeuralProphet Model** with regressors: `{', '.join(final_neuralprophet_regressors)}` for {target_variable}")
+        model, df, success = fit_neuralprophet_model(series, external_features[final_neuralprophet_regressors], target_col)
         if success:
-            future = model.make_future_dataframe(periods=forecast_horizon, freq='MS')
-            historical_regressors = external_features[final_prophet_regressors].reset_index().rename(columns={'month': 'ds'})
-            future = pd.merge(future, historical_regressors, on='ds', how='left')
-            # Min-max scale the future regressors using the same scaler
-            if scaler is not None:
-                # Only scale the columns used as regressors
-                future_regressors = future[final_prophet_regressors]
-                scaled_future = scaler.transform(future_regressors)
-                future[final_prophet_regressors] = scaled_future
-            future[final_prophet_regressors] = future[final_prophet_regressors].fillna(method='ffill')
+            # Generate future dataframe
+            future = model.make_future_dataframe(df, periods=forecast_horizon)
+            if final_neuralprophet_regressors:
+                # Add regressors to future dataframe
+                for col in final_neuralprophet_regressors:
+                    future[col] = external_features[col].iloc[-1]  # Use last known value for future predictions
+            
+            # Make predictions
             forecast = model.predict(future)
-            forecast_values = forecast['yhat'].tail(forecast_horizon).values
+            
+            # Debug: Print available forecast columns
+            st.write("Available forecast columns:", forecast.columns.tolist())
+            
+            # Get the forecast values and ensure we have the right length
+            forecast_values = forecast['yhat1'].values[-forecast_horizon:]  # Take only the last forecast_horizon values
             forecast_values[forecast_values < 0] = 0
-            forecast_results['Prophet'] = {'values': forecast_values, 'confidence': forecast[['yhat_lower', 'yhat_upper']].tail(forecast_horizon).values}
-            model_info['Prophet'] = {'type': 'Prophet', 'paradigm': 'Time Series Decomposition', 'score': 'N/A', 'features': final_prophet_regressors}
-            status_container.success("✅ Prophet model trained.")
+            
+            # Calculate confidence intervals using the trend and seasonality components
+            trend = forecast['trend'].values[-forecast_horizon:]
+            season = forecast['season_yearly'].values[-forecast_horizon:]
+            ar = forecast['ar1'].values[-forecast_horizon:]
+            
+            # Calculate standard deviation from components
+            std_dev = np.std(forecast_values) * 0.1  # Use 10% of std dev as uncertainty
+            lower_ci = forecast_values - 1.96 * std_dev
+            upper_ci = forecast_values + 1.96 * std_dev
+            
+            # Create date index for the forecast period
+            forecast_dates = pd.date_range(start=series.index[-1] + pd.offsets.MonthBegin(1), periods=forecast_horizon, freq='MS')
+            
+            # Create forecast DataFrame with the correct length
+            forecast_df = pd.DataFrame({
+                'forecast': forecast_values,
+                'lower_CI': lower_ci,
+                'upper_CI': upper_ci,
+                'trend': trend,
+                'seasonality': season,
+                'ar': ar
+            }, index=forecast_dates)
+            
+            # Verify all arrays have the same length
+            assert len(forecast_values) == len(trend) == len(season) == len(ar) == len(forecast_dates) == forecast_horizon, \
+                f"Length mismatch: forecast={len(forecast_values)}, trend={len(trend)}, season={len(season)}, ar={len(ar)}, dates={len(forecast_dates)}, horizon={forecast_horizon}"
+            
+            forecast_results['NeuralProphet'] = {'values': forecast_values, 'confidence': np.column_stack([lower_ci, upper_ci])}
+            model_info['NeuralProphet'] = {
+                'type': 'NeuralProphet',
+                'paradigm': 'Deep Learning Time Series',
+                'score': 'N/A',
+                'features': final_neuralprophet_regressors
+            }
+            status_container.success("✅ NeuralProphet model trained.")
 
     elif PMDARIMA_AVAILABLE and "univariate" in suggested_model:
         status_container.write(f"📈 **Training Auto-ARIMA Model** (Classical Econometrics) for {target_variable}")
