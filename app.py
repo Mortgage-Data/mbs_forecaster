@@ -418,6 +418,84 @@ with st.expander("📊 Model Configuration", expanded=True):
         st.write("") # Spacer
         run_prediction = st.button("🚀 **Run Forecast**", type="primary", use_container_width=True)
 
+# --- New Section: Future Scenario Assumptions ---
+st.markdown("---")
+st.subheader("🔮 Future Scenario Assumptions")
+
+scen_col1, scen_col2, scen_col3, scen_col4 = st.columns(4)
+
+# 1. Future 30-Year Mortgage Rate
+with scen_col1:
+    last_pmms = None
+    try:
+        last_pmms = float(con.execute("SELECT pmms30 FROM main.pmms ORDER BY as_of_date DESC LIMIT 1;").fetchone()[0])
+    except Exception:
+        last_pmms = 0.07
+    future_pmms6 = st.number_input(
+        "30-Year Mortgage Rate (6th Month)",
+        min_value=0.0, max_value=0.2, value=round(last_pmms, 4), step=0.0001,
+        help="What do you think the 30-year mortgage rate will be in 6 months?"
+    )
+
+# 2. Expected Annual Home Price Growth
+with scen_col2:
+    hpi_growth_options = {
+        "Flat": [0, 0, 0, 0, 0, 0],
+        "Slow Decline": [-0.002, -0.003, -0.004, -0.005, -0.006, -0.007],
+        "Steep Decline": [-0.01, -0.012, -0.014, -0.016, -0.018, -0.02],
+        "Slow Increase": [0.002, 0.003, 0.004, 0.005, 0.006, 0.007],
+        "Steep Increase": [0.01, 0.012, 0.014, 0.016, 0.018, 0.02],
+    }
+    hpi_growth_choice = st.selectbox(
+        "Expected Annual Home Price Growth",
+        list(hpi_growth_options.keys()),
+        index=0,
+        help="Choose a scenario for home price growth."
+    )
+    hpi_growth_6mo = hpi_growth_options[hpi_growth_choice]
+
+# 3. Expected Unemployment Rate
+with scen_col3:
+    last_unemp = None
+    try:
+        last_unemp = float(con.execute("SELECT unemployment_rate FROM main.unemployment ORDER BY as_of_date DESC LIMIT 1;").fetchone()[0])
+    except Exception:
+        last_unemp = 0.04
+    future_unemp6 = st.number_input(
+        "Unemployment Rate (6th Month)",
+        min_value=0.0, max_value=0.2, value=round(last_unemp, 4), step=0.0001,
+        help="What do you think the unemployment rate will be in 6 months?"
+    )
+
+# 4. Volatility in the Economy
+with scen_col4:
+    volatility_choice = st.selectbox(
+        "Volatility in the Economy",
+        ["Low", "Medium", "High"],
+        index=0,
+        help="How much volatility do you expect in the economy?"
+    )
+
+# --- Helper: Generate 6-month paths for PMMS and Unemployment based on volatility ---
+def interpolate_path(start, end, steps, volatility):
+    if volatility == "Low":
+        return np.linspace(start, end, steps)
+    elif volatility == "Medium":
+        base = np.linspace(start, end, steps)
+        noise = np.random.normal(0, abs(end-start)*0.05 + 0.001, steps)
+        return base + noise
+    else:  # High
+        base = np.linspace(start, end, steps)
+        noise = np.random.normal(0, abs(end-start)*0.12 + 0.002, steps)
+        return base + noise
+
+future_pmms_path = interpolate_path(last_pmms, future_pmms6, forecast_horizon, volatility_choice)
+future_unemp_path = interpolate_path(last_unemp, future_unemp6, forecast_horizon, volatility_choice)
+
+# --- SQL Query Update: Add HPI and Unemployment ---
+# (This is a placeholder; you will implement the actual tables/fields)
+# Add: hpi, hpi_1m_lag, hpi_3m_lag, hpi_3m_avg, unemployment_rate, unemployment_rate_1m_lag, unemployment_rate_3m_lag, unemployment_rate_3m_avg
+
 # --- Update WHERE clause logic ---
 safe_seller_name = selected_seller.replace("'", "''")
 where_conditions = [
@@ -522,9 +600,19 @@ with st.spinner("Loading and preparing data..."):
                 SUM(prepayable_balance) as prepayable_balance, -- Get beginning balance from active loans
                 AVG(pmms30) as pmms30,
                 AVG(pmms30_1m_lag) as pmms30_1m_lag,
-                AVG(pmms30_2m_lag) as pmms30_2m_lag
+                AVG(pmms30_2m_lag) as pmms30_2m_lag,
+                AVG(hpi) as hpi,
+                AVG(LAG(hpi, 1) OVER (ORDER BY DATE_TRUNC('month', as_of_month))) as hpi_1m_lag,
+                AVG(LAG(hpi, 3) OVER (ORDER BY DATE_TRUNC('month', as_of_month))) as hpi_3m_lag,
+                AVG(hpi) OVER (ORDER BY DATE_TRUNC('month', as_of_month) ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) as hpi_3m_avg,
+                AVG(unemployment_rate) as unemployment_rate,
+                AVG(LAG(unemployment_rate, 1) OVER (ORDER BY DATE_TRUNC('month', as_of_month))) as unemployment_rate_1m_lag,
+                AVG(LAG(unemployment_rate, 3) OVER (ORDER BY DATE_TRUNC('month', as_of_month))) as unemployment_rate_3m_lag,
+                AVG(unemployment_rate) OVER (ORDER BY DATE_TRUNC('month', as_of_month) ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) as unemployment_rate_3m_avg
             FROM main.gse_sf_mbs a
             LEFT JOIN main.pmms b ON a.as_of_month = b.as_of_date
+            LEFT JOIN main.hpi c ON a.as_of_month = c.as_of_date
+            LEFT JOIN main.unemployment d ON a.as_of_month = d.as_of_date
             WHERE is_in_bcpr3 AND prefix = 'CL' AND {where_clause}
             AND as_of_month >= '2021-10-01'
             AND loan_correction_indicator != 'pri' -- CRUCIAL: Exclude synthetic rows here
@@ -802,40 +890,115 @@ with st.spinner("Training models and generating forecasts..."):
             st.warning(f"⚠️ {fallback_reason} Falling back to Simple model.")
 
     elif NEURALPROPHET_AVAILABLE and suggested_model == "multivariate":
-        neuralprophet_regressors = ['refi_incentive', 'rate_volatility', 'weighted_avg_credit_score']
+        neuralprophet_regressors = [
+            'refi_incentive', 'rate_volatility', 'weighted_avg_credit_score',
+            'pmms30', 'pmms30_1m_lag', 'pmms30_3m_lag', 'pmms30_3m_avg',
+            'hpi', 'hpi_1m_lag', 'hpi_3m_lag', 'hpi_3m_avg',
+            'unemployment_rate', 'unemployment_rate_1m_lag', 'unemployment_rate_3m_lag', 'unemployment_rate_3m_avg'
+        ]
         final_neuralprophet_regressors = [col for col in neuralprophet_regressors if col in external_features.columns]
         st.write(f"🔮 **Training NeuralProphet Model** with regressors: `{', '.join(final_neuralprophet_regressors)}` for {target_variable}")
         model, df, success = fit_neuralprophet_model(series, external_features[final_neuralprophet_regressors], target_col)
         if success:
-            # Generate future dataframe
             future = model.make_future_dataframe(df, periods=forecast_horizon)
-            if final_neuralprophet_regressors:
-                # Add regressors to future dataframe
-                for col in final_neuralprophet_regressors:
-                    future[col] = external_features[col].iloc[-1]  # Use last known value for future predictions
+            # Fill future regressor values for all periods
+            for col in final_neuralprophet_regressors:
+                if col.startswith('pmms30'):
+                    # Use generated path for pmms30 and lags/avg
+                    if col == 'pmms30':
+                        vals = future_pmms_path
+                    elif col == 'pmms30_1m_lag':
+                        vals = np.roll(future_pmms_path, 1)
+                        vals[0] = external_features['pmms30_1m_lag'].iloc[-1]
+                    elif col == 'pmms30_3m_lag':
+                        vals = np.roll(future_pmms_path, 3)
+                        vals[:3] = external_features['pmms30_3m_lag'].iloc[-1]
+                    elif col == 'pmms30_3m_avg':
+                        vals = pd.Series(future_pmms_path).rolling(3, min_periods=1).mean().values
+                    else:
+                        vals = [external_features[col].iloc[-1]] * forecast_horizon
+                elif col.startswith('hpi'):
+                    # Use HPI growth scenario
+                    if col == 'hpi':
+                        last_hpi = external_features['hpi'].iloc[-1]
+                        vals = [last_hpi]
+                        for g in hpi_growth_6mo:
+                            vals.append(vals[-1] * (1 + g))
+                        vals = vals[1:]
+                    elif col == 'hpi_1m_lag':
+                        vals = np.roll([external_features['hpi'].iloc[-1]] + [external_features['hpi'].iloc[-1] * (1 + g) for g in hpi_growth_6mo], 1)[1:]
+                    elif col == 'hpi_3m_lag':
+                        vals = np.roll([external_features['hpi'].iloc[-1]] + [external_features['hpi'].iloc[-1] * (1 + g) for g in hpi_growth_6mo], 3)[3:]
+                    elif col == 'hpi_3m_avg':
+                        hpi_vals = [external_features['hpi'].iloc[-1]]
+                        for g in hpi_growth_6mo:
+                            hpi_vals.append(hpi_vals[-1] * (1 + g))
+                        hpi_vals = hpi_vals[1:]
+                        vals = pd.Series(hpi_vals).rolling(3, min_periods=1).mean().values
+                    else:
+                        vals = [external_features[col].iloc[-1]] * forecast_horizon
+                elif col.startswith('unemployment_rate'):
+                    if col == 'unemployment_rate':
+                        vals = future_unemp_path
+                    elif col == 'unemployment_rate_1m_lag':
+                        vals = np.roll(future_unemp_path, 1)
+                        vals[0] = external_features['unemployment_rate_1m_lag'].iloc[-1]
+                    elif col == 'unemployment_rate_3m_lag':
+                        vals = np.roll(future_unemp_path, 3)
+                        vals[:3] = external_features['unemployment_rate_3m_lag'].iloc[-1]
+                    elif col == 'unemployment_rate_3m_avg':
+                        vals = pd.Series(future_unemp_path).rolling(3, min_periods=1).mean().values
+                    else:
+                        vals = [external_features[col].iloc[-1]] * forecast_horizon
+                else:
+                    vals = [external_features[col].iloc[-1]] * forecast_horizon
+                # Only fill the new/future rows (not the historical part)
+                future.loc[future['ds'] > df['ds'].max(), col] = vals
+                # If the regressor is missing in the historical part, fill with the last known value as well
+                future[col] = future[col].fillna(method='ffill').fillna(method='bfill')
             
             # Make predictions
             forecast = model.predict(future)
             
-            # Debug: Print available forecast columns
+            # Debug: Print available forecast columns and their lengths
             st.write("Available forecast columns:", forecast.columns.tolist())
+            st.write("Forecast horizon:", forecast_horizon)
+            st.write("Full forecast length:", len(forecast))
             
             # Get the forecast values and ensure we have the right length
-            forecast_values = forecast['yhat1'].values[-forecast_horizon:]  # Take only the last forecast_horizon values
+            # NeuralProphet returns predictions for all dates, we need to filter for future dates
+            future_mask = forecast['ds'] > series.index[-1]
+            forecast_values = forecast.loc[future_mask, 'yhat1'].values
             forecast_values[forecast_values < 0] = 0
             
             # Calculate confidence intervals using the trend and seasonality components
-            trend = forecast['trend'].values[-forecast_horizon:]
-            season = forecast['season_yearly'].values[-forecast_horizon:]
-            ar = forecast['ar1'].values[-forecast_horizon:]
+            trend = forecast.loc[future_mask, 'trend'].values
+            season = forecast.loc[future_mask, 'season_yearly'].values
+            ar = forecast.loc[future_mask, 'ar1'].values
+            
+            # Debug: Print lengths of all components
+            st.write("Component lengths:", {
+                'forecast_values': len(forecast_values),
+                'trend': len(trend),
+                'season': len(season),
+                'ar': len(ar)
+            })
             
             # Calculate standard deviation from components
             std_dev = np.std(forecast_values) * 0.1  # Use 10% of std dev as uncertainty
             lower_ci = forecast_values - 1.96 * std_dev
             upper_ci = forecast_values + 1.96 * std_dev
             
-            # Create date index for the forecast period
-            forecast_dates = pd.date_range(start=series.index[-1] + pd.offsets.MonthBegin(1), periods=forecast_horizon, freq='MS')
+            # Create date index for the forecast period using the actual forecast dates
+            forecast_dates = forecast.loc[future_mask, 'ds']
+            
+            # Debug: Print date range info
+            st.write("Date range:", {
+                'start': forecast_dates.iloc[0],
+                'end': forecast_dates.iloc[-1],
+                'length': len(forecast_dates),
+                'forecast_values_length': len(forecast_values)
+            })
             
             # Create forecast DataFrame with the correct length
             forecast_df = pd.DataFrame({
@@ -848,8 +1011,8 @@ with st.spinner("Training models and generating forecasts..."):
             }, index=forecast_dates)
             
             # Verify all arrays have the same length
-            assert len(forecast_values) == len(trend) == len(season) == len(ar) == len(forecast_dates) == forecast_horizon, \
-                f"Length mismatch: forecast={len(forecast_values)}, trend={len(trend)}, season={len(season)}, ar={len(ar)}, dates={len(forecast_dates)}, horizon={forecast_horizon}"
+            assert len(forecast_values) == len(trend) == len(season) == len(ar) == len(forecast_dates), \
+                f"Length mismatch: forecast={len(forecast_values)}, trend={len(trend)}, season={len(season)}, ar={len(ar)}, dates={len(forecast_dates)}"
             
             forecast_results['NeuralProphet'] = {'values': forecast_values, 'confidence': np.column_stack([lower_ci, upper_ci])}
             model_info['NeuralProphet'] = {
