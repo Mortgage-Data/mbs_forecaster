@@ -331,7 +331,9 @@ with header_col2:
 
 st.markdown("---")
 
-with st.expander("📊 Model Configuration", expanded=True):
+# --- Updated Model Configuration Header ---
+st.markdown("<h4 style='display: flex; align-items: center; font-size: 1.3rem;'><span style='font-size:1.5rem; margin-right: 0.5em;'>📊</span> <span style='font-weight:600;'>Model Configuration</span></h4>", unsafe_allow_html=True)
+with st.expander("", expanded=True):
     # Reorganized layout for clarity
     row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
     row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
@@ -420,7 +422,7 @@ with st.expander("📊 Model Configuration", expanded=True):
 
 # --- New Section: Future Scenario Assumptions ---
 st.markdown("---")
-st.subheader("🔮 Future Scenario Assumptions")
+st.markdown("<h4 style='display: flex; align-items: center; font-size: 1.3rem;'><span style='font-size:1.5rem; margin-right: 0.5em;'>🔮</span> <span style='font-weight:600;'>Future Scenario Assumptions</span></h4>", unsafe_allow_html=True)
 
 scen_col1, scen_col2, scen_col3, scen_col4 = st.columns(4)
 
@@ -431,11 +433,14 @@ with scen_col1:
         last_pmms = float(con.execute("SELECT pmms30 FROM main.pmms ORDER BY as_of_date DESC LIMIT 1;").fetchone()[0])
     except Exception:
         last_pmms = 0.07
-    future_pmms6 = st.number_input(
-        "30-Year Mortgage Rate (6th Month)",
-        min_value=0.0, max_value=0.2, value=round(last_pmms, 4), step=0.0001,
+    last_pmms_pct = round(last_pmms * 100, 3)
+    future_pmms6_pct = st.number_input(
+        "30-Year Mortgage Rate (6th Month) [%]",
+        min_value=0.0, max_value=20.0, value=last_pmms_pct, step=0.001,
+        format="%.3f",
         help="What do you think the 30-year mortgage rate will be in 6 months?"
     )
+    future_pmms6 = future_pmms6_pct / 100.0
 
 # 2. Expected Annual Home Price Growth
 with scen_col2:
@@ -461,11 +466,14 @@ with scen_col3:
         last_unemp = float(con.execute("SELECT unemployment_rate FROM main.unemployment ORDER BY as_of_date DESC LIMIT 1;").fetchone()[0])
     except Exception:
         last_unemp = 0.04
-    future_unemp6 = st.number_input(
-        "Unemployment Rate (6th Month)",
-        min_value=0.0, max_value=0.2, value=round(last_unemp, 4), step=0.0001,
+    last_unemp_pct = round(last_unemp * 100, 1)
+    future_unemp6_pct = st.number_input(
+        "Unemployment Rate (6th Month) [%]",
+        min_value=0.0, max_value=20.0, value=last_unemp_pct, step=0.1,
+        format="%.1f",
         help="What do you think the unemployment rate will be in 6 months?"
     )
+    future_unemp6 = future_unemp6_pct / 100.0
 
 # 4. Volatility in the Economy
 with scen_col4:
